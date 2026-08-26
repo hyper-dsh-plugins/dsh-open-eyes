@@ -6,7 +6,7 @@ import type { MockServer } from './helpers/server.js'
 import { json, startServer } from './helpers/server.js'
 import { Config, validateConfig } from '../src/config.js'
 import { VisionBridgeError } from '../src/errors.js'
-import { createVisionTool } from '../src/tool.js'
+import { applyVisualPreference, createVisionTool } from '../src/tool.js'
 import { TRUNCATION_MARKER, UNTRUSTED_EVIDENCE_NOTICE } from '../src/result.js'
 import type { VisionAnalyzeResult } from '../src/result.js'
 
@@ -38,6 +38,20 @@ async function codeOf(value: Promise<unknown>) {
 }
 
 describe('vision_analyze tool', () => {
+  it('rejects a disabled session before reading config, credentials, or images', async () => {
+    const fake = ctx()
+    const current = vi.fn(() => validateConfig(Config({})))
+    const enabled = vi.fn(() => false)
+    const tool = createVisionTool(fake.value, current, enabled)
+
+    expect(await codeOf(tool.execute({ images: ['private.png'], prompt: 'read it' }, exec()))).toBe('VISION_DISABLED')
+    expect(enabled).toHaveBeenCalledTimes(1)
+    expect(current).not.toHaveBeenCalled()
+    expect(fake.credentials.resolve).not.toHaveBeenCalled()
+    expect(fake.value.fs.readBytes).not.toHaveBeenCalled()
+    expect(fake.value.attachments.validateImage).not.toHaveBeenCalled()
+  })
+
   it('publishes the requested argument schema and a closed canonical output schema', () => {
     const tool = createVisionTool(ctx().value, validateConfig(Config({})))
     expect(tool.name).toBe('vision_analyze')
@@ -56,11 +70,11 @@ describe('vision_analyze tool', () => {
 
   it('allows dormant loading but reports not configured at call time', async () => {
     const tool = createVisionTool(ctx().value, validateConfig(Config({})))
-    expect(tool.description).toContain('INSTALLED BUT NOT CONFIGURED')
+    expect(tool.description).toContain('Open Eyes')
     expect(await codeOf(tool.execute({ images: ['a.png'], prompt: 'read it' }, exec()))).toBe('VISION_NOT_CONFIGURED')
   })
 
-  it('advertises ready state and the configured default without requiring a probe call', () => {
+  it('keeps provider identity out of the stable tool contract', () => {
     const config = validateConfig(Config({ providers: [{
       id: 'primary',
       protocol: 'openai-responses',
@@ -69,10 +83,110 @@ describe('vision_analyze tool', () => {
       credential: 'VISION_API_KEY',
     }] }))
     const tool = createVisionTool(ctx().value, config)
-    expect(tool.description).toContain('READY')
-    expect(tool.description).toContain('default provider: primary')
+    expect(tool.description).not.toContain('primary')
+    expect(tool.description).not.toContain('vision-model')
     expect(tool.description).toContain('Markdown links labelled "Attached image"')
     expect(tool.description).toContain('do not expose bridge routing internals')
+  })
+
+  it('uses the latest default provider on the next call through the same tool instance', async () => {
+    const first = await startServer((_request, response) => json(response, 200, { output_text: 'first' }))
+    const second = await startServer((_request, response) => json(response, 200, { output_text: 'second' }))
+    servers.push(first, second)
+    let current = validateConfig(Config({
+      allowRemoteUrls: true,
+      providers: [{
+        id: 'first',
+        protocol: 'openai-responses',
+        baseUrl: first.origin,
+        model: 'first-model',
+        authMode: 'none',
+      }],
+    }))
+    const tool = createVisionTool(ctx().value, () => current)
+
+    await expect(tool.execute({ images: ['https://images.example.test/a.png'], prompt: 'x' }, exec()))
+      .resolves.toMatchObject({ provider: 'first', text: 'first' })
+
+    current = validateConfig(Config({
+      allowRemoteUrls: true,
+      providers: [{
+        id: 'second',
+        protocol: 'openai-responses',
+        baseUrl: second.origin,
+        model: 'second-model',
+        authMode: 'none',
+      }],
+    }))
+    await expect(tool.execute({ images: ['https://images.example.test/a.png'], prompt: 'x' }, exec()))
+      .resolves.toMatchObject({ provider: 'second', text: 'second' })
+    expect(first.requests).toHaveLength(1)
+    expect(second.requests).toHaveLength(1)
+  })
+
+  it('treats a blank optional provider as omitted and still uses the current default', async () => {
+    const mock = await startServer((_request, response) => json(response, 200, { output_text: 'default answer' }))
+    servers.push(mock)
+    const config = validateConfig(Config({
+      allowRemoteUrls: true,
+      providers: [{
+        id: 'primary',
+        protocol: 'openai-responses',
+        baseUrl: mock.origin,
+        model: 'vision-model',
+        authMode: 'none',
+      }],
+    }))
+    const tool = createVisionTool(ctx().value, config)
+
+    await expect(tool.execute({
+      images: ['https://images.example.test/a.png'],
+      prompt: 'Read it.',
+      provider: '   ',
+    }, exec())).resolves.toMatchObject({ provider: 'primary', text: 'default answer' })
+  })
+
+  it('adds the selected visual-analysis preset, focus areas, and custom text only to the delegated prompt', async () => {
+    const mock = await startServer((_request, response) => json(response, 200, { output_text: 'focused answer' }))
+    servers.push(mock)
+    const config = validateConfig(Config({
+      preference: 'Focus on exact error codes and timestamps.',
+      visualAnalysis: 'deep',
+      focusAreas: ['text', 'details'],
+      allowRemoteUrls: true,
+      providers: [{
+        id: 'primary',
+        protocol: 'openai-responses',
+        baseUrl: mock.origin,
+        model: 'vision-model',
+        authMode: 'none',
+      }],
+    }))
+    const tool = createVisionTool(ctx().value, config)
+
+    await tool.execute({
+      images: ['https://images.example.test/a.png'],
+      prompt: 'What is visible?',
+    }, exec())
+
+    const body = mock.requests[0]?.body as {
+      input?: Array<{ content?: Array<{ type?: string; text?: string }> }>
+    }
+    expect(body.input?.[0]?.content?.find(block => block.type === 'input_text')?.text).toBe(
+      'What is visible?\n\nAnalyze the image thoroughly, describe relevant evidence and important details comprehensively, check ambiguous areas carefully, and keep the response detailed.; In addition to the requested analysis, pay particular attention to: text and OCR, anomalies and fine details.; Additional preference: Focus on exact error codes and timestamps.',
+    )
+  })
+
+  it('keeps the delegated prompt byte-for-byte unchanged when every visual preference is default', () => {
+    const config = validateConfig(Config({}))
+    expect(applyVisualPreference('Inspect the image.', config)).toBe('Inspect the image.')
+  })
+
+  it('appends a custom supplement after the model-generated tool prompt on the provider side', () => {
+    const config = validateConfig(Config({ preference: '重视材质描述' }))
+    expect(applyVisualPreference('判断这展示的是什么操作系统。', config)).toBe(
+      '判断这展示的是什么操作系统。\n\nAdditional preference: 重视材质描述',
+    )
   })
 
   it('revalidates empty/too-many images, blank/long prompts, and provider selection', async () => {
@@ -186,6 +300,9 @@ describe('vision_analyze tool', () => {
     })
     expect(JSON.stringify(view)).not.toContain(sensitiveUrl)
     expect(JSON.stringify(view)).not.toContain('private visual question')
+    expect(tool.presentCall?.({ images: ['a.png'], prompt: 'x', provider: '   ' })).toMatchObject({
+      rawInput: { provider: 'default' },
+    })
   })
 
   it('truncates by Unicode code point and appends a clear marker while succeeding', async () => {

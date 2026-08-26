@@ -6,11 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1-rc.2] - 2026-08-26
+
 ### Changed
 
+- Upgraded the audited DSH compatibility line and public client declarations to `0.1.1-rc.2`.
+- Added a bilingual Settings → Plugins → Plugin configuration card for creating multiple provider schemes, entering API endpoint/model/API key, and selecting the default scheme; advanced fields remain preserved and outside the dynamic form.
+- Made every scheme source-neutral in the Settings card: all schemes can be edited, selected, or removed without an origin badge.
 - Moved the essential compatibility, uninstall, and rollback guidance into the bilingual README files and removed the standalone `docs/` tree from the public repository and npm package.
 - Clarified that installation can be delegated to any harness with local Shell access, recommends using a harness other than the DSH instance being modified to avoid task interruption, and added concise configuration, data-boundary, troubleshooting, development, license, and security guidance to both README files.
 - Simplified the Node.js compatibility range to `>=22.19.0` across package metadata and documentation.
+- Increased the advanced default provider deadline from 90 seconds to five minutes and made the existing retry limit effective with two retries by default; the Settings UI and all exposed configuration interactions are unchanged.
+
+### Fixed
+
+- Preserved the exact `sendSession` outcome, `AbortSignal`, `this`, and thrown exception through every Web wrapper branch, and release draft images only after a successful bridge submission.
+- Added composition coverage with the contract-preserving `dsh-open-file` wrapper in both load orders so co-installation cannot strand Composer in the submitting state.
+- Resolved the current default vision scheme at each tool call so an existing session uses a newly selected scheme without re-registration or context changes.
+- Accepted complete protocol endpoint URLs without appending `/responses`, `/chat/completions`, or `/v1/messages` a second time.
+- Reported safe, actionable provider-validation diagnostics including upstream HTTP status, network reachability, JSON parsing, protocol-response, and response-size failures without rendering upstream bodies.
+- Added protocol-specific API endpoint examples through the native DSH tooltip and question icon while retaining base-URL and complete-endpoint input compatibility.
+- Added independent model-list discovery for OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages, including secure discovery before a scheme is saved.
+- Refined the Settings editor with model-before-API-key ordering, manual model fallback, save-and-validate, validation quota help, and an active Edit button that toggles the inline editor closed.
+- Added a new-session-only Enable switch with static Tool/Skill registration: enabled sessions bridge every Web image, while disabled sessions pass untouched to DSH before plugin-side image or credential work.
+- Simplified collapsed scheme rows to display name (or scheme ID fallback) plus model, made the outer radio the sole default selector, and retained the last valid card content read-only during a transient Settings outage.
+- Normalized an empty optional `provider` tool argument to the live default scheme, matching omission while preserving explicit unknown-provider errors.
+- Unified row and save-and-validate feedback through the native DSH Toast, added a token-based inset editor surface, and added an explicit multimodal-capability reminder to discovered models.
+- Added live visual preferences with a no-op Default, Visual analysis presets, checkable Focus areas, and a 50-unit Custom supplement; settings are semicolon-composed only into delegated provider prompts and never into durable conversation or model-visible system/tool state.
+- Added bounded recovery for transient connection failures, response-body disconnects, per-attempt timeouts, and retryable edge statuses during model discovery, validation, and inference while keeping authentication, request, protocol, and caller-cancellation failures terminal.
+- Increased the protocol-specific validation response allowance so reasoning-capable providers do not falsely fail merely because a 16-token probe returned no visible text.
+
+### Security
+
+- Settings exposes only browser-safe provider metadata. API key literals use the official credential write seam and are never stored in Settings, rendered, logged, or included in errors.
 
 ## [0.1.0] - 2026-08-15
 
@@ -40,5 +68,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Provider credentials, configured header values, image encodings, URLs, upstream errors, and provider-controlled metadata are bounded and redacted at public error/render boundaries.
 - Publication fails unless the built canonical package name and manifest identity agree.
 
-[Unreleased]: https://github.com/Hyp6666/dsh-open-eyes/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Hyp6666/dsh-open-eyes/compare/v0.1.1-rc.2...HEAD
+[0.1.1-rc.2]: https://github.com/Hyp6666/dsh-open-eyes/compare/v0.1.0...v0.1.1-rc.2
 [0.1.0]: https://github.com/Hyp6666/dsh-open-eyes/releases/tag/v0.1.0

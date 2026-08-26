@@ -80,6 +80,17 @@ describe('OpenAI Chat Completions adapter', () => {
     })
   })
 
+  it('accepts a base URL that already contains the Chat Completions endpoint', async () => {
+    const mock = await server((_request, response) => json(response, 200, { choices: [{ message: { content: 'answer' } }] }))
+
+    await analyzeOpenAIChatCompletions(request(provider(
+      'openai-chat-completions',
+      `${mock.origin}/gateway/v1/chat/completions`,
+    )))
+
+    expect(mock.requests[0]?.url).toBe('/gateway/v1/chat/completions')
+  })
+
   it('rejects missing choices, empty text, and reserved body overrides', async () => {
     const mock = await server((_request, response) => json(response, 200, { choices: [] }))
     const config = provider('openai-chat-completions', mock.origin)

@@ -84,6 +84,14 @@ describe('OpenAI Responses adapter', () => {
     })
   })
 
+  it('accepts a base URL that already contains the Responses endpoint', async () => {
+    const mock = await server((_request, response) => json(response, 200, { output_text: 'answer' }))
+
+    await analyzeOpenAIResponses(request(provider('openai-responses', `${mock.origin}/gateway/v1/responses`)))
+
+    expect(mock.requests[0]?.url).toBe('/gateway/v1/responses')
+  })
+
   it('rejects empty content and defensively rejects reserved extraBody fields', async () => {
     const mock = await server((_request, response) => json(response, 200, { output: [] }))
     const config = provider('openai-responses', mock.origin)

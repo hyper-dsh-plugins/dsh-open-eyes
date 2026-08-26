@@ -29,6 +29,13 @@ export interface AdapterRequest {
   readonly transport: AdapterTransportOptions
 }
 
+export interface AdapterModelsRequest {
+  readonly provider: ResolvedProviderConfig
+  readonly authHeaders: Readonly<Record<string, string>>
+  readonly secrets: readonly string[]
+  readonly transport: AdapterTransportOptions
+}
+
 export interface NormalizedUsage {
   input_tokens?: number
   output_tokens?: number

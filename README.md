@@ -8,87 +8,118 @@
 
 <p align="center">English · <a href="./README.zh-CN.md">中文</a></p>
 
-## What it does
+`dsh-open-eyes` adds configurable vision to DeepSeek Harness. Attach a screenshot, photo, chart, or interface to a conversation, and the main model can delegate the visual work to a multimodal model of your choice. The analysis returns as text in the same conversation, so the main model itself does not need native image support.
 
-The main model used by DeepSeek Harness does not always support images. When a conversation involves a screenshot, photo, chart, or interface, `dsh-open-eyes` can send the image to a separately configured multimodal model and return its analysis as text to the current conversation.
-
-The analysis remains part of the same conversation as ordinary text.
-
-If the current main model already supports images, the plugin stays out of the way and DSH keeps using its native image path. Images pasted, dropped, or selected in the WebUI are bridged only when the current model is explicitly known not to support images.
-
-The plugin also provides the `vision_analyze` tool for analyzing local image paths and explicitly enabled remote image URLs.
+Open Eyes supports OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages endpoints. It is provider-neutral: you choose the API endpoint, model, and credentials.
 
 > **Unofficial community plugin:** `dsh-open-eyes` is an independent community project. It is not affiliated with, endorsed by, or maintained by DeepSeek.
 
-Three provider API formats are supported:
+## Install
 
-- OpenAI Responses
-- OpenAI Chat Completions
-- Anthropic Messages
+Requirements: DeepSeek Harness `0.1.1-rc.2` and Node.js `>=22.19.0`.
 
-Any vision service that implements one of these APIs can be connected. You choose the endpoint, model, and credentials; the plugin is not tied to a particular provider.
+```sh
+dsh plugin --profile web add dsh-open-eyes@0.1.1-rc.2
+```
 
-API keys are resolved through DSH Credential References and should never be placed in `cordis.patch.yml`, conversation text, or tool arguments. Local images are workspace-contained by default, and remote image URLs are disabled by default.
+Restart DSH Web after installation, then reload the page. DSH profiles are independent, so install the plugin separately in every profile where you want to use it.
 
-> Images handled by the bridge are sent to the third-party provider you configure. Review that provider's retention, privacy, and billing terms before use. Treat the vision model's response as evidence, not as instructions to execute.
+## Find Open Eyes in Settings
 
-## Usage
+Open **Settings → Plugins → Plugin configuration** and expand **Open Eyes**. The card is named **Open Eyes** in English and **开放视觉** in Chinese, following the DSH interface language.
 
-Requirements:
+<p align="center">
+  <img src="./assets/screenshots/open-eyes-settings.png" width="860" alt="Open Eyes card in Settings, Plugins, Plugin configuration">
+</p>
 
-- Node.js `>=22.19.0`
-- DeepSeek Harness `0.1.0-rc.6`
+## Configure your vision model
 
-DSH profiles are independent. Install and configure the plugin separately in each profile where it is needed.
+Open Eyes lets you create multiple vision schemes and switch the active default at any time. Each scheme has an optional display name, API endpoint, model, and API Key. The editor accepts either a service base URL or the complete endpoint for the selected protocol.
 
-### Option 1: ask another harness to install it
+Three protocols are available:
 
-Any harness with Shell access and permission to manage local DSH profiles can perform the installation. Prefer a harness other than the DSH instance being modified: installing or updating the active DSH profile may require a restart and interrupt the current DSH task. If the harness cannot run local commands or edit the profile, use the manual steps below instead.
+- `openai-responses`
+- `openai-chat-completions`
+- `anthropic-messages`
 
-Give the other harness this prompt:
+You can enter a model manually or use **Fetch models** to read the service's model list. Because a model catalog does not reliably declare image capability, confirm that the model you select is multimodal. **Validate connection** sends one tiny test image through the real configured model, while **Save and validate** checks a new or edited scheme immediately.
+
+<p align="center">
+  <img src="./assets/screenshots/provider-configuration.png" width="600" alt="Open Eyes vision provider scheme editor">
+</p>
+
+The compact scheme list shows only the display name and model. Use the radio button on the left to select the default scheme. Editing opens directly below the matching scheme, and the same button collapses it again. Validation results appear without expanding or reshaping the scheme row.
+
+API Keys are written only through DSH Credentials. They are never stored in plugin Settings or `cordis.patch.yml`. Leave the API Key blank while editing to keep the existing key. Deleting a scheme does not automatically delete its saved credential.
+
+## Choose when Open Eyes is active
+
+The **Enable** switch applies to new conversations:
+
+- A conversation created while Open Eyes is enabled bridges every Web image through the configured vision workflow.
+- A conversation created while it is disabled leaves image handling entirely to DSH.
+- Existing conversations keep the state they had when they were created, even if the switch changes later.
+
+Changing the default vision scheme does not require a new conversation. The next visual analysis in the same conversation uses the newly selected scheme.
+
+## Personalize the visual analysis
+
+The conversation model creates a task-specific `vision_analyze` prompt from your question—for example, to transcribe an error, inspect a layout, read a chart, or compare two screenshots. The optional **Preference** panel gives you another layer of control:
+
+- **Visual analysis:** Default, Efficiency first, or In-depth analysis.
+- **Focus areas:** Text and OCR, Tables and charts, Interface and layout, Objects and scenes, and Anomalies and details.
+- **Custom supplement:** up to 50 words or text units of your own guidance.
+
+<p align="center">
+  <img src="./assets/screenshots/visual-preferences.png" width="660" alt="Open Eyes visual analysis preferences">
+</p>
+
+Preferences are applied internally after the visible Tool Call and immediately before the request is sent to the vision model. This is why the extra preference text does not appear in the Tool Call arguments. It does not modify the main model's system prompt, conversation history, tool declaration, or Harness loop. Leaving every option at **Default** adds nothing and preserves the original task prompt exactly.
+
+Preference changes apply to the next visual analysis, including inside an existing conversation.
+
+## Use it
+
+Paste, drop, or select an image in DSH Web, ask the question you actually want answered, and send it normally. Open Eyes keeps the user's text in the same conversation, provides a session-bound attachment to the vision tool, and returns the visual model's analysis for the main model to use.
+
+In the example below, the non-multimodal main model **GLM-5.3 (High effort)** receives an image question, calls `vision_analyze`, delegates the image to **GPT-5.6-Luna**, and uses the returned visual evidence in its answer.
+
+<p align="center">
+  <img src="./assets/screenshots/vision-delegation-example.png" width="560" alt="GLM-5.3 delegates an attached image to GPT-5.6-Luna through Open Eyes">
+</p>
+
+The same tool can analyze image files already available to an Agent:
 
 ```text
-Install dsh-open-eyes in my local DeepSeek Harness web profile and configure
-vision-bridge.
-
-Use the DeepSeek Harness plugin command:
-dsh plugin --profile web add dsh-open-eyes
-
-Use only a Credential Reference in the configuration. Do not put an API key
-in YAML or in the conversation. Preserve the existing profile configuration
-and do not change unrelated rows.
-
-When finished, run:
-dsh --profile web --dump-config
-
-Confirm that vision-bridge and vision-bridge-skill are loaded, then remind me
-to restart dsh web and reload the page. If changing the active profile would
-interrupt this task, stop after verification and let me restart it myself.
+Call vision_analyze on screenshots/error.png. Transcribe the exact error code
+and describe the actions visibly available in the interface.
 ```
 
-### Option 2: install it yourself
+Local PNG, JPEG, WebP, and GIF files are supported. Relative paths resolve from the current Agent session working directory. Remote image URLs are disabled by default and can be enabled through advanced configuration when needed.
 
-Install from npm:
+## How it works
 
-```sh
-dsh plugin --profile web add dsh-open-eyes
-```
+1. You attach an image and ask a normal question.
+2. The conversation model turns that question into a focused visual task.
+3. Open Eyes applies any saved preferences and sends the image to the selected multimodal provider.
+4. The visual analysis returns as untrusted evidence for the conversation model to interpret and answer.
 
-You can also install the tarball attached to a GitHub Release:
+The default vision scheme and visual preferences are resolved for every analysis, so both can change live without rebuilding the conversation. The Enable state is deliberately fixed when a conversation is created so repeatedly toggling it cannot change that conversation's model-visible prompt or tool catalog.
 
-```sh
-dsh plugin --profile web add ./dsh-open-eyes-0.1.0.tgz
-```
+## Advanced and headless configuration
 
-Catalog inclusion is not required for either command: DSH installs the published npm package directly into the selected profile. To use the tool in a headless profile, replace `web` with `headless`. Profiles remain independent.
+The Settings card covers the fields most people need. Advanced request limits, retries, custom headers, authentication overrides, remote URLs, and filesystem policies remain available in `cordis.patch.yml` and are preserved when a scheme is edited in Settings.
 
-## Configuration
-
-Configure a vision provider in `~/.dsh/profiles/web/cordis.patch.yml`:
+<details>
+<summary>Minimal advanced configuration example</summary>
 
 ```yaml
 - id: vision-bridge
   config:
+    enabled: true
+    visualAnalysis: default
+    focusAreas: []
+    preference: ''
     providers:
       - id: my-vision
         protocol: openai-chat-completions
@@ -100,106 +131,53 @@ Configure a vision provider in `~/.dsh/profiles/web/cordis.patch.yml`:
     defaultProvider: my-vision
 ```
 
-Store `VISION_PROVIDER_API_KEY` in the Credential source used by DSH. Keep only this reference name in the configuration file; do not put the real key there.
+Store `VISION_PROVIDER_API_KEY` in the Credential source used by DSH. Keep only the reference name in configuration.
 
-Available protocols:
+For a headless profile, replace `web` in the installation and inspection commands with the intended profile name. The `vision_analyze` tool and bundled `vision-bridge` Skill remain available without the Web Settings card.
 
-| `protocol` | Default authentication | Notes |
-| --- | --- | --- |
-| `openai-responses` | Bearer | OpenAI Responses API |
-| `openai-chat-completions` | Bearer | Chat Completions API |
-| `anthropic-messages` | `x-api-key` | `maxOutputTokens` is required |
+</details>
 
-Check the configuration:
+## Privacy and safety
+
+- Images processed through Open Eyes are sent to the third-party provider you configure. Review that provider's privacy, retention, and billing terms.
+- Credentials are resolved through DSH Credential References for each request. API Key literals are not accepted in tool arguments or browser plugin requests.
+- Local files stay inside the Agent workspace and explicitly allowed roots by default. Supported image bytes are validated before upload.
+- Remote image URLs are disabled by default. When enabled, the configured provider fetches the URL; Open Eyes does not download it first.
+- Visual model output is treated as untrusted evidence, not as instructions to execute.
+
+## Reliability and compatibility
+
+- Designed and tested for DeepSeek Harness `0.1.1-rc.2`.
+- Compatible with `dsh-open-file@0.1.1-rc.2` in either installation order.
+- Text-only submissions and disabled conversations stay on the original DSH submission path.
+- Submission outcomes, cancellation, errors, and draft images are preserved through the Web wrapper.
+- Model discovery, validation, and visual inference recover from bounded transient network, timeout, response-body, rate-limit, and gateway failures. The default is a five-minute deadline per attempt with up to two retries.
+
+Authentication, request, protocol, and user-cancellation failures are not retried. In the rare case where a provider accepted a request just before the connection failed, a recovery retry may create duplicate provider usage or billing.
+
+## Troubleshooting
+
+- **Open Eyes is not visible:** confirm the package was installed in the same profile that is running, restart DSH Web, and reload the page.
+- **A new conversation uses the wrong route:** check the Enable switch, then create another conversation; existing conversations keep their creation-time state.
+- **Validation cannot connect:** verify the protocol, endpoint suffix, model name, API Key, DNS, port, TLS, account quota, and service status. The validation message distinguishes these categories where possible.
+- **Model discovery returns no models:** continue with manual model entry and confirm the model supports images.
+- **`VISION_NOT_CONFIGURED`:** add at least one scheme and select a valid default.
+
+Inspect the active profile with:
 
 ```sh
 dsh --profile web --dump-config
 ```
 
-After installing or updating the plugin, restart DSH Web and reload the page.
-
-## Start using it
-
-Paste, drop, or select an image in the WebUI, write the question you intended to ask, and send it normally.
-
-The plugin does not add a question on your behalf or expose internal handoff instructions in the user message:
-
-- If the current main model supports images, DSH keeps using its native image path.
-- If the current main model explicitly does not support images, the configured vision provider is used.
-- If no vision provider is configured, sending stops with a configuration notice and the image is not uploaded.
-
-You can also ask DSH to call `vision_analyze` directly:
-
-```text
-Call vision_analyze on screenshots/error.png. Transcribe the exact error code
-and describe the actions that are visibly available in the interface.
-```
-
-Local PNG, JPEG, WebP, and GIF files are supported. Relative paths are resolved from the current Agent session working directory.
-
-Remote image URLs are disabled by default. Enable them only when needed:
-
-```yaml
-allowRemoteUrls: true
-```
-
-When enabled, the configured vision provider fetches the image URL. The plugin does not download the remote image locally first.
-
-The example above is the minimum configuration needed for a typical provider. Keep API keys in DSH Credential storage and place only the Credential Reference name in this file.
-
-## Permissions and data
-
-- When the bridge is used, the selected image and prompt are sent to the configured vision provider. Review that provider's privacy, retention, and billing terms.
-- Local image reads remain inside the Agent workspace and explicitly allowed roots by default. The plugin rejects final symlinks and validates supported image bytes before upload.
-- Remote image URLs are disabled by default. When enabled, the provider fetches the URL; the plugin does not download it locally.
-- Credentials are resolved from DSH Credential References for each call. They are not accepted in tool arguments, written to configuration, or cached by the plugin.
-- The Web bridge delegates only for a route explicitly declared text-only. Image-capable and unknown routes remain on DSH's native image path.
-- Retries are disabled by default. Enabling them can repeat a billable provider request after a transient failure.
-
-## Compatibility
-
-- DeepSeek Harness: `0.1.0-rc.6`
-- Node.js: `>=22.19.0`
-- Last verified: `2026-08-15`
-- Verified against DeepSeek Harness commit: `47f943859bef60e4160492346772ded9b24f765a`
-
-Web paste integration is pinned to the rc.6 conversation and model-capability seams. Recheck those seams before using the plugin with another DSH release line.
-
-## Troubleshooting
-
-- `VISION_NOT_CONFIGURED`: add at least one provider, set a valid default when needed, and—unless authentication is disabled—store the referenced credential in DSH.
-- The package installs but the rows are absent: confirm that installation and configuration used the same profile, then run `dsh --profile web --dump-config` and look for `vision-bridge` and `vision-bridge-skill`.
-- A pasted image stays on the native path: this is expected when the selected model supports images or its capability is unknown. The bridge activates only for an explicitly text-only route.
-- Installation from an active DSH task is interrupted: rerun the same `dsh plugin --profile web add dsh-open-eyes` command from a regular shell or another harness, verify with `--dump-config`, and restart DSH Web.
-- After an update, restart DSH Web and reload the browser before diagnosing client behavior.
-
-## Uninstall and rollback
-
-Remove the package from the profile where it was installed:
+## Uninstall
 
 ```sh
 dsh plugin --profile web remove dsh-open-eyes
 ```
 
-The command removes the package and its bundle layer. If `~/.dsh/profiles/web/cordis.patch.yml` still contains user-authored rows with the ids `vision-bridge` or `vision-bridge-skill`, remove only those rows and preserve every unrelated entry.
-
-Verify the resulting profile:
-
-```sh
-dsh --profile web --dump-config
-```
-
-The output should contain neither `vision-bridge` nor `vision-bridge-skill`. Restart DSH Web and reload the browser page afterward.
-
-To return to the current release after testing another build, install its exact version again:
-
-```sh
-dsh plugin --profile web add dsh-open-eyes@0.1.0
-```
+Restart DSH Web and reload the page afterward. If you added `vision-bridge` or `vision-bridge-skill` rows manually, remove only those rows and preserve unrelated profile configuration.
 
 ## Development
-
-The repository uses pnpm and Node.js `>=22.19.0`:
 
 ```sh
 corepack enable
@@ -212,8 +190,8 @@ npm pack --dry-run
 pnpm run test:e2e
 ```
 
-The E2E test packs the real npm tarball and exercises temporary-profile installation and removal without calling a paid vision API. See the [contribution guide](https://github.com/Hyp6666/dsh-open-eyes/blob/main/CONTRIBUTING.md) for repository conventions.
+The test suite does not require a paid vision API. The packed-profile test installs, starts, and removes the real tarball in a temporary DSH profile and also exercises coexistence with `dsh-open-file` in both installation orders.
 
-## License and security
+## License
 
-Released under the [MIT License](./LICENSE). Report security issues privately as described in the [security policy](https://github.com/Hyp6666/dsh-open-eyes/blob/main/SECURITY.md); do not publish unpatched vulnerabilities, credentials, private images, or signed URLs in a public issue.
+Released under the [MIT License](./LICENSE). Security issues should be reported privately according to the [security policy](https://github.com/Hyp6666/dsh-open-eyes/blob/main/SECURITY.md).

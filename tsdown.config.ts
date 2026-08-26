@@ -11,7 +11,10 @@ const config: UserConfig = {
   format: 'cjs',
   platform: 'browser',
   target: 'es2023',
-  deps: { neverBundle: ['react'] },
+  // Both are DSH Web platform seed words. Keeping the official primitives
+  // external reuses the host's exact components and CSS instead of bundling a
+  // second UI implementation.
+  deps: { neverBundle: ['react', '@deepseek-ai/dsh-client-ui-primitives'] },
   dts: false,
   sourcemap: false,
   clean: false,

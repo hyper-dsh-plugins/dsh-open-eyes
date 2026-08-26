@@ -1,4 +1,7 @@
 import { WEB_DRAFT_ENDPOINT, WEB_IMAGE_ROUTE_ENDPOINT } from '../web-contract.js'
+import type { SubmitOutcome } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
+
+export type { SubmitOutcome as BridgeSubmitOutcome } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 
 export interface BridgeSession {
   readonly sessionId: string
@@ -19,17 +22,11 @@ export interface BridgeConversation {
     text: string,
     imageIds: readonly string[],
     mode: BridgeSubmitMode,
-  ): Promise<void>
+    signal?: AbortSignal,
+  ): Promise<SubmitOutcome>
   draftImages(ids: readonly string[]): readonly BridgeDraftAttachment[]
   releaseDraftImages(attachments: readonly BridgeDraftAttachment[]): void
 }
-
-export interface BridgeCurrentModel {
-  readonly provider: string
-  readonly model: string
-}
-
-export type BridgeCurrentModelResolver = (sessionId: string) => Promise<BridgeCurrentModel>
 
 export interface WebDraftUploadResponse {
   readonly configured: boolean
@@ -102,22 +99,23 @@ async function boundedJson(response: Response, failure: string): Promise<unknown
 
 async function resolveImageRoute(
   sessionId: string,
-  current: BridgeCurrentModel,
   fetcher: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<WebImageRoutingResponse> {
   const response = await fetcher(WEB_IMAGE_ROUTE_ENDPOINT, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sessionId, provider: current.provider, model: current.model }),
+    body: JSON.stringify({ sessionId }),
     credentials: 'same-origin',
     redirect: 'error',
+    ...(signal === undefined ? {} : { signal }),
   })
   if (!response.ok) {
-    throw new Error(`Vision Bridge could not determine the current model's image capability (HTTP ${response.status}).`)
+    throw new Error(`Open Eyes could not read this session's enablement state (HTTP ${response.status}).`)
   }
-  const payload = await boundedJson(response, 'Vision Bridge returned an invalid model capability response.')
+  const payload = await boundedJson(response, 'Open Eyes returned an invalid session routing response.')
   if (!validRoutingResponse(payload)) {
-    throw new Error('Vision Bridge returned an invalid model capability response.')
+    throw new Error('Open Eyes returned an invalid session routing response.')
   }
   return payload
 }
@@ -126,6 +124,7 @@ async function uploadDrafts(
   sessionId: string,
   images: readonly SerializedDraft[],
   fetcher: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<WebDraftUploadResponse> {
   const response = await fetcher(WEB_DRAFT_ENDPOINT, {
     method: 'POST',
@@ -133,6 +132,7 @@ async function uploadDrafts(
     body: JSON.stringify({ sessionId, images }),
     credentials: 'same-origin',
     redirect: 'error',
+    ...(signal === undefined ? {} : { signal }),
   })
   if (!response.ok) {
     throw new Error(`Vision Bridge could not accept the pasted image (HTTP ${response.status}).`)
@@ -171,33 +171,30 @@ export function buildBridgePrompt(userText: string, upload: WebDraftUploadRespon
 /** Wrap the concrete Web conversation submission seam while preserving all text-only behavior. */
 export function createVisionBridgeSendSession(
   conversation: BridgeConversation,
-  resolveCurrentModel: BridgeCurrentModelResolver,
   fetcher: typeof fetch = fetch,
 ): BridgeConversation['sendSession'] {
   const original = conversation.sendSession
-  return async (session, text, imageIds, mode): Promise<void> => {
+  return async (session, text, imageIds, mode, signal) => {
     if (imageIds.length === 0) {
-      await original.call(conversation, session, text, imageIds, mode)
-      return
+      return original.call(conversation, session, text, imageIds, mode, signal)
+    }
+    const routing = await resolveImageRoute(session.sessionId, fetcher, signal)
+    if (routing.route === 'native') {
+      return original.call(conversation, session, text, imageIds, mode, signal)
+    }
+    if (!routing.configured) {
+      throw new Error('Vision Bridge is installed but not configured. Configure a provider and Credential Reference before sending pasted images.')
     }
     const attachments = conversation.draftImages(imageIds)
     if (attachments.length !== imageIds.length) {
       throw new Error('Vision Bridge could not resolve one or more pasted image drafts.')
     }
-    const current = await resolveCurrentModel(session.sessionId)
-    const routing = await resolveImageRoute(session.sessionId, current, fetcher)
-    if (routing.route === 'native') {
-      await original.call(conversation, session, text, imageIds, mode)
-      return
-    }
-    if (!routing.configured) {
-      throw new Error('Vision Bridge is installed but not configured. Configure a provider and Credential Reference before sending pasted images.')
-    }
     const images: SerializedDraft[] = []
     for (const attachment of attachments) images.push(await serializeDraft(attachment.file))
-    const upload = await uploadDrafts(session.sessionId, images, fetcher)
+    const upload = await uploadDrafts(session.sessionId, images, fetcher, signal)
     const prompt = buildBridgePrompt(text, upload)
-    await original.call(conversation, session, prompt, [], mode)
-    conversation.releaseDraftImages(attachments)
+    const outcome = await original.call(conversation, session, prompt, [], mode, signal)
+    if (outcome.kind === 'success') conversation.releaseDraftImages(attachments)
+    return outcome
   }
 }

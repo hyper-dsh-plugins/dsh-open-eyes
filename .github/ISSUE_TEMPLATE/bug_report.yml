@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: Package and DSH versions
-      placeholder: 'dsh-open-eyes 0.1.0; @deepseek-ai/dsh 0.1.0-rc.6'
+      placeholder: 'dsh-open-eyes 0.1.1-rc.2; @deepseek-ai/dsh 0.1.1-rc.2'
     validations:
       required: true
   - type: dropdown

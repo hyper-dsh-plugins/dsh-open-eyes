@@ -9,11 +9,14 @@ import {
   WEB_ATTACHMENT_ENDPOINT,
   WEB_DRAFT_ENDPOINT,
   WEB_IMAGE_ROUTE_ENDPOINT,
+  WEB_PROVIDER_VALIDATION_ENDPOINT,
   createWebAttachmentHandler,
   createWebDraftHandler,
   createWebImageRouteHandler,
+  createWebProviderValidationHandler,
   decodeWebAttachmentReference,
 } from '../src/web-draft.js'
+import * as webDraftModule from '../src/web-draft.js'
 
 const png = readFileSync(new URL('../fixtures/tiny.png', import.meta.url))
 const servers: Server[] = []
@@ -89,6 +92,100 @@ async function post(
 }
 
 describe('WebUI pasted-image draft admission', () => {
+  it('accepts browser-safe discovery metadata while rejecting secret fields', async () => {
+    const createHandler = (webDraftModule as typeof webDraftModule & {
+      createWebProviderModelsHandler?: (options: {
+        readonly models: (draft: {
+          readonly providerId: string
+          readonly protocol: string
+          readonly baseUrl: string
+          readonly credential?: string
+        }, signal: AbortSignal) => Promise<readonly string[]>
+      }) => ReturnType<typeof createWebDraftHandler>
+    }).createWebProviderModelsHandler
+    expect(createHandler).toBeTypeOf('function')
+    if (createHandler === undefined) return
+    const models = vi.fn(async () => ['vision-b', 'vision-a'])
+    const origin = await serve(createHandler({ models }))
+
+    const draft = {
+      providerId: 'primary',
+      protocol: 'openai-responses',
+      baseUrl: 'https://vision.example.test/v1',
+      credential: 'DSH_OPEN_EYES_P7072696D617279_R6D6F64656C2D646973636F766572792D6C6F6F6B75702D31_API_KEY',
+    }
+    const response = await post(origin, draft, {}, '/vision-bridge/v1/provider-models')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true, models: ['vision-b', 'vision-a'] })
+    expect(models).toHaveBeenCalledWith(draft, expect.any(AbortSignal))
+
+    const rejected = await post(origin, {
+      providerId: 'primary',
+      apiKey: 'must-not-enter-model-discovery',
+    }, {}, '/vision-bridge/v1/provider-models')
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ error: 'VISION_WEB_INVALID_PROVIDER_MODELS' })
+    expect(models).toHaveBeenCalledOnce()
+  })
+
+  it('validates one saved provider id without accepting credentials in the request', async () => {
+    const validate = vi.fn(async () => undefined)
+    const origin = await serve(createWebProviderValidationHandler({ validate }))
+
+    const success = await post(origin, { providerId: 'primary' }, {}, WEB_PROVIDER_VALIDATION_ENDPOINT)
+    expect(success.status).toBe(200)
+    expect(await success.json()).toEqual({ ok: true })
+    expect(validate).toHaveBeenCalledWith('primary', expect.any(AbortSignal))
+
+    const rejected = await post(origin, {
+      providerId: 'primary',
+      apiKey: 'must-not-enter-this-route',
+    }, {}, WEB_PROVIDER_VALIDATION_ENDPOINT)
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ error: 'VISION_WEB_INVALID_PROVIDER_VALIDATION' })
+    expect(validate).toHaveBeenCalledOnce()
+  })
+
+  it('returns a safe HTTP diagnostic without reflecting upstream response text', async () => {
+    const origin = await serve(createWebProviderValidationHandler({
+      validate: async () => {
+        throw Object.assign(new Error('vision provider returned HTTP 404: upstream echoed secret-value'), {
+          code: 'VISION_UPSTREAM_HTTP',
+        })
+      },
+    }))
+
+    const response = await post(origin, { providerId: 'primary' }, {}, WEB_PROVIDER_VALIDATION_ENDPOINT)
+    expect(response.status).toBe(502)
+    const responseText = await response.text()
+    expect(JSON.parse(responseText)).toEqual({
+      ok: false,
+      error: 'VISION_UPSTREAM_HTTP',
+      diagnostic: { reason: 'http', httpStatus: 404 },
+    })
+    expect(responseText).not.toContain('secret-value')
+  })
+
+  it.each([
+    ['vision provider network request failed', 'network'],
+    ['vision provider returned a non-JSON response', 'invalid-json'],
+    ['OpenAI Responses returned no text output', 'invalid-response'],
+  ] as const)('classifies a safe upstream protocol diagnostic for %s', async (message, reason) => {
+    const origin = await serve(createWebProviderValidationHandler({
+      validate: async () => {
+        throw Object.assign(new Error(message), { code: 'VISION_UPSTREAM_PROTOCOL' })
+      },
+    }))
+
+    const response = await post(origin, { providerId: 'primary' }, {}, WEB_PROVIDER_VALIDATION_ENDPOINT)
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: 'VISION_UPSTREAM_PROTOCOL',
+      diagnostic: { reason },
+    })
+  })
+
   it('serves a bridge thumbnail only when the exact token is in its direct user session log', async () => {
     const attachments = fakeAttachments()
     const { name: _name, ...stableRef } = attachmentRef()
@@ -129,17 +226,13 @@ describe('WebUI pasted-image draft admission', () => {
     expect(attachments.readImage).not.toHaveBeenCalled()
   })
 
-  it('routes declared text-only models to the bridge without admitting a prompt', async () => {
-    const resolveModelInfo = vi.fn(async () => ({ inputModalities: ['text'] }))
+  it('routes every image through the bridge when the session latched enabled', async () => {
     const origin = await serve(createWebImageRouteHandler({
-      hasSession: id => id === 'session-1',
-      resolveModelInfo,
+      isEnabled: id => id === 'session-1' ? true : undefined,
       config: resolved(),
     }))
     const response = await post(origin, {
       sessionId: 'session-1',
-      provider: 'main-provider',
-      model: 'text-model',
     }, {}, WEB_IMAGE_ROUTE_ENDPOINT)
 
     expect(response.status).toBe(200)
@@ -149,45 +242,27 @@ describe('WebUI pasted-image draft admission', () => {
       defaultProvider: 'primary',
       providerIds: ['primary'],
     })
-    expect(resolveModelInfo).toHaveBeenCalledWith('main-provider', 'text-model')
   })
 
-  it('routes image-capable and unknown-capability models through native DSH on every request', async () => {
-    const resolveModelInfo = vi.fn()
-      .mockResolvedValueOnce({ inputModalities: ['text', 'image'] })
-      .mockResolvedValueOnce({})
+  it('routes a disabled session through native DSH without inspecting the main model', async () => {
     const origin = await serve(createWebImageRouteHandler({
-      hasSession: () => true,
-      resolveModelInfo,
+      isEnabled: () => false,
       config: resolved(false),
     }))
-    const body = { sessionId: 'session-1', provider: 'main-provider', model: 'switchable-model' }
+    const body = { sessionId: 'session-1' }
 
-    const declared = await post(origin, body, {}, WEB_IMAGE_ROUTE_ENDPOINT)
-    const unknown = await post(origin, body, {}, WEB_IMAGE_ROUTE_ENDPOINT)
+    const response = await post(origin, body, {}, WEB_IMAGE_ROUTE_ENDPOINT)
 
-    expect((await declared.json() as { route: string }).route).toBe('native')
-    expect((await unknown.json() as { route: string }).route).toBe('native')
-    expect(resolveModelInfo).toHaveBeenCalledTimes(2)
+    expect((await response.json() as { route: string }).route).toBe('native')
   })
 
-  it('rejects unknown sessions and fails closed when model capability cannot be resolved', async () => {
+  it('rejects unknown sessions', async () => {
     const unknownSession = await serve(createWebImageRouteHandler({
-      hasSession: () => false,
-      resolveModelInfo: vi.fn(),
+      isEnabled: () => undefined,
       config: resolved(),
     }))
-    const body = { sessionId: 'missing', provider: 'main-provider', model: 'text-model' }
+    const body = { sessionId: 'missing' }
     expect((await post(unknownSession, body, {}, WEB_IMAGE_ROUTE_ENDPOINT)).status).toBe(404)
-
-    const unavailable = await serve(createWebImageRouteHandler({
-      hasSession: () => true,
-      resolveModelInfo: vi.fn(async () => { throw new Error('provider leaked error') }),
-      config: resolved(),
-    }))
-    const response = await post(unavailable, { ...body, sessionId: 'session-1' }, {}, WEB_IMAGE_ROUTE_ENDPOINT)
-    expect(response.status).toBe(503)
-    expect(await response.json()).toEqual({ error: 'VISION_WEB_MODEL_CAPABILITY_UNAVAILABLE' })
   })
 
   it('validates then durably saves a same-origin image and returns a session-bound reference', async () => {

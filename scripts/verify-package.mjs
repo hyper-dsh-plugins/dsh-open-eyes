@@ -37,7 +37,7 @@ const [manifestText, clientBundle, readme, readmeZh] = await Promise.all([
   readFile(new URL('../README.zh-CN.md', import.meta.url), 'utf8'),
 ])
 const manifest = JSON.parse(manifestText)
-if (manifest.name !== PACKAGE_NAME || manifest.version !== '0.1.0') {
+if (manifest.name !== PACKAGE_NAME || manifest.version !== '0.1.1-rc.2') {
   throw new Error('unexpected package identity')
 }
 if (manifest.license !== 'MIT' || manifest.repository?.url !== 'git+https://github.com/Hyp6666/dsh-open-eyes.git') {
@@ -69,6 +69,12 @@ if (manifest.dsh?.client?.platform !== 'web' || manifest.exports?.['./client'] =
 if (manifest.peerDependencies?.react !== '^18.2.0' || !clientBundle.includes('require("react")')) {
   throw new Error('Web client must reuse the DSH React runtime instead of bundling a private copy')
 }
+const clientRequires = [...clientBundle.matchAll(/require\("([^"]+)"\)/gu)].map(match => match[1])
+const supportedClientRequires = new Set(['react', '@deepseek-ai/dsh-client-ui-primitives'])
+const unsupportedClientRequires = [...new Set(clientRequires.filter(name => !supportedClientRequires.has(name)))]
+if (unsupportedClientRequires.length > 0) {
+  throw new Error(`Web client imports unsupported runtime modules: ${unsupportedClientRequires.join(', ')}`)
+}
 if (!clientBundle.includes(`id: "${PACKAGE_NAME}"`) || !clientBundle.includes(`const PACKAGE_NAME = "${PACKAGE_NAME}"`)) {
   throw new Error('Web client module identity does not match PACKAGE_NAME')
 }
@@ -77,4 +83,19 @@ if (!clientBundle.includes('react.createElement)(stock, props)')) {
 }
 if (!clientBundle.includes('/vision-bridge/v1/web-attachment')) {
   throw new Error('Web client is missing the session-authorized history image reader')
+}
+if (!clientBundle.includes('/vision-bridge/v1/provider-validation')) {
+  throw new Error('Web client is missing the saved-provider validation request')
+}
+if (!clientBundle.includes('/vision-bridge/v1/provider-models')) {
+  throw new Error('Web client is missing provider model discovery')
+}
+if (!clientBundle.includes('require("@deepseek-ai/dsh-client-ui-primitives")')) {
+  throw new Error('Web client must reuse the DSH-native UI primitives')
+}
+if (!clientBundle.includes('settings.plugin.item') || !clientBundle.includes('vision-bridge: settings dictionaries')) {
+  throw new Error('Web client is missing the plugin configuration card registration')
+}
+if (!clientBundle.includes('credentials.set') || !clientBundle.includes('settings.mutate')) {
+  throw new Error('Web client is missing the separated settings and credential write seams')
 }

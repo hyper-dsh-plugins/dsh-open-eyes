@@ -12,18 +12,25 @@ export interface HttpJsonRequest {
   readonly secrets: readonly string[]
 }
 
+export type HttpJsonGetRequest = Omit<HttpJsonRequest, 'body'>
+
 export interface HttpJsonResponse {
   readonly payload: unknown
   readonly headers: Headers
   readonly status: number
 }
 
-const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524])
 const RETRYABLE_NETWORK_CODES = new Set([
   'ECONNRESET',
   'ECONNREFUSED',
   'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'ENETUNREACH',
   'ETIMEDOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CLOSED',
   'UND_ERR_SOCKET',
   'UND_ERR_CONNECT_TIMEOUT',
   'UND_ERR_HEADERS_TIMEOUT',
@@ -40,7 +47,7 @@ function isTransientNetworkError(error: unknown): boolean {
   return error instanceof TypeError && RETRYABLE_NETWORK_CODES.has(causeCode(error) ?? '')
 }
 
-function classifyAbort(caller: AbortSignal, timeout: AbortSignal, _error: unknown): never {
+function classifyAbort(caller: AbortSignal, timeout: AbortSignal): never {
   if (caller.aborted) {
     throw new VisionBridgeError('VISION_ABORTED', 'vision analysis was aborted')
   }
@@ -137,42 +144,57 @@ async function wait(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-export async function postJson(request: HttpJsonRequest): Promise<HttpJsonResponse> {
-  const timeoutSignal = AbortSignal.timeout(request.timeoutMs)
-  const signal = AbortSignal.any([request.signal, timeoutSignal])
+async function requestJson(
+  request: HttpJsonGetRequest,
+  method: 'GET' | 'POST',
+  body?: unknown,
+): Promise<HttpJsonResponse> {
+  // Model discovery remains at least one-retry idempotent. Provider POSTs use
+  // the explicitly bounded deployment budget so transient edge, transport,
+  // and timeout failures do not become immediate tool failures.
+  const maximumRetries = method === 'GET' ? Math.max(1, request.maxRetries) : request.maxRetries
+
+  async function backoff(attempt: number, retryAfter: string | null = null): Promise<void> {
+    try {
+      await wait(retryDelay(retryAfter, attempt, request.maxRetryDelayMs), request.signal)
+    } catch {
+      throw new VisionBridgeError('VISION_ABORTED', 'vision analysis was aborted')
+    }
+  }
 
   for (let attempt = 0; ; attempt += 1) {
+    const timeoutSignal = AbortSignal.timeout(request.timeoutMs)
+    const signal = AbortSignal.any([request.signal, timeoutSignal])
     let response: Response
     try {
       const headers = new Headers(request.headers)
-      headers.set('content-type', 'application/json')
+      if (method === 'POST') headers.set('content-type', 'application/json')
       response = await fetch(request.url, {
-        method: 'POST',
+        method,
         headers,
-        body: JSON.stringify(request.body),
+        ...(method === 'POST' ? { body: JSON.stringify(body) } : {}),
         redirect: 'error',
         signal,
       })
     } catch (error) {
-      if (signal.aborted) classifyAbort(request.signal, timeoutSignal, error)
-      if (attempt < request.maxRetries && isTransientNetworkError(error)) {
-        try {
-          await wait(retryDelay(null, attempt, request.maxRetryDelayMs), signal)
-        } catch (abortError) {
-          classifyAbort(request.signal, timeoutSignal, abortError)
+      if (request.signal.aborted) classifyAbort(request.signal, timeoutSignal)
+      if (timeoutSignal.aborted) {
+        if (attempt < maximumRetries) {
+          await backoff(attempt)
+          continue
         }
+        classifyAbort(request.signal, timeoutSignal)
+      }
+      if (attempt < maximumRetries && isTransientNetworkError(error)) {
+        await backoff(attempt)
         continue
       }
       throw new VisionBridgeError('VISION_UPSTREAM_PROTOCOL', 'vision provider network request failed')
     }
 
-    if (!response.ok && RETRYABLE_STATUS.has(response.status) && attempt < request.maxRetries) {
+    if (!response.ok && RETRYABLE_STATUS.has(response.status) && attempt < maximumRetries) {
       await response.body?.cancel()
-      try {
-        await wait(retryDelay(response.headers.get('retry-after'), attempt, request.maxRetryDelayMs), signal)
-      } catch (error) {
-        classifyAbort(request.signal, timeoutSignal, error)
-      }
+      await backoff(attempt, response.headers.get('retry-after'))
       continue
     }
 
@@ -180,7 +202,22 @@ export async function postJson(request: HttpJsonRequest): Promise<HttpJsonRespon
     try {
       bytes = await readBounded(response, request.maxResponseBytes)
     } catch (error) {
-      if (signal.aborted) classifyAbort(request.signal, timeoutSignal, error)
+      if (request.signal.aborted) classifyAbort(request.signal, timeoutSignal)
+      if (timeoutSignal.aborted) {
+        if (attempt < maximumRetries) {
+          await backoff(attempt)
+          continue
+        }
+        classifyAbort(request.signal, timeoutSignal)
+      }
+      if (attempt < maximumRetries && isTransientNetworkError(error)) {
+        await response.body?.cancel().catch(() => undefined)
+        await backoff(attempt)
+        continue
+      }
+      if (error instanceof TypeError) {
+        throw new VisionBridgeError('VISION_UPSTREAM_PROTOCOL', 'vision provider network request failed')
+      }
       throw error
     }
     const raw = new TextDecoder().decode(bytes)
@@ -197,4 +234,12 @@ export async function postJson(request: HttpJsonRequest): Promise<HttpJsonRespon
 
     return { payload: parseJson(bytes), headers: response.headers, status: response.status }
   }
+}
+
+export async function postJson(request: HttpJsonRequest): Promise<HttpJsonResponse> {
+  return requestJson(request, 'POST', request.body)
+}
+
+export async function getJson(request: HttpJsonGetRequest): Promise<HttpJsonResponse> {
+  return requestJson(request, 'GET')
 }

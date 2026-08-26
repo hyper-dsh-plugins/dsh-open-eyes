@@ -1,12 +1,18 @@
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { VisionBridgeConfigError } from './errors.js'
+import { AUTH_MODES, PROTOCOLS, type AuthMode, type Protocol } from './provider-contract.js'
+import { MAX_PREFERENCE_CHARS } from './settings-contract.js'
+import {
+  VISUAL_ANALYSIS_MODES,
+  VISUAL_FOCUS_AREAS,
+  normalizeFocusAreas,
+  normalizeVisualAnalysis,
+  type VisualAnalysisMode,
+  type VisualFocusArea,
+} from './visual-preferences.js'
 
-export const PROTOCOLS = ['openai-responses', 'openai-chat-completions', 'anthropic-messages'] as const
-export type Protocol = (typeof PROTOCOLS)[number]
-
-export const AUTH_MODES = ['bearer', 'x-api-key', 'none'] as const
-export type AuthMode = (typeof AUTH_MODES)[number]
+export { AUTH_MODES, PROTOCOLS, type AuthMode, type Protocol } from './provider-contract.js'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
@@ -27,6 +33,10 @@ export interface ProviderConfig {
 }
 
 export interface Config {
+  enabled: boolean
+  preference: string
+  visualAnalysis: VisualAnalysisMode
+  focusAreas: VisualFocusArea[]
   providers: ProviderConfig[]
   defaultProvider?: string
   timeoutMs: number
@@ -82,15 +92,19 @@ const ProviderSchema = z.object({
 })
 
 export const Config = z.object({
+  enabled: z.boolean().default(true),
+  preference: z.string().default(''),
+  visualAnalysis: z.union(VISUAL_ANALYSIS_MODES.map(value => z.const(value))).default('default'),
+  focusAreas: z.array(z.union(VISUAL_FOCUS_AREAS.map(value => z.const(value)))).default([]),
   providers: z.array(ProviderSchema).default([]),
   defaultProvider: z.string(),
-  timeoutMs: z.natural().default(90_000),
+  timeoutMs: z.natural().default(300_000),
   maxImageBytes: z.natural().default(10 * 1024 * 1024),
   maxImages: z.natural().default(4),
   maxPromptChars: z.natural().default(16_000),
   maxOutputChars: z.natural().default(32_000),
   maxResponseBytes: z.natural().default(2 * 1024 * 1024),
-  maxRetries: z.natural().default(0),
+  maxRetries: z.natural().default(2),
   maxRetryDelayMs: z.natural().default(5_000),
   allowRemoteUrls: z.boolean().default(false),
   allowOutsideWorkspace: z.boolean().default(false),
@@ -291,6 +305,19 @@ function normalizeRoots(roots: readonly string[]): string[] {
 }
 
 export function validateConfig(input: Config): ResolvedConfig {
+  if (typeof input.preference !== 'string') fail('preference must be a string')
+  const preference = input.preference.trim()
+  if ([...preference].length > MAX_PREFERENCE_CHARS) {
+    fail(`preference must be no longer than ${MAX_PREFERENCE_CHARS} characters`)
+  }
+  let visualAnalysis: VisualAnalysisMode
+  let focusAreas: VisualFocusArea[]
+  try {
+    visualAnalysis = normalizeVisualAnalysis(input.visualAnalysis)
+    focusAreas = normalizeFocusAreas(input.focusAreas)
+  } catch {
+    fail('visual preferences contain an unsupported option')
+  }
   validatePositiveInteger('timeoutMs', input.timeoutMs)
   validatePositiveInteger('maxImageBytes', input.maxImageBytes)
   validatePositiveInteger('maxImages', input.maxImages)
@@ -320,6 +347,10 @@ export function validateConfig(input: Config): ResolvedConfig {
   }
 
   return Object.freeze({
+    enabled: input.enabled,
+    preference,
+    visualAnalysis,
+    focusAreas: Object.freeze(focusAreas) as unknown as VisualFocusArea[],
     providers: Object.freeze(providers),
     ...(defaultProvider === undefined ? {} : { defaultProvider }),
     timeoutMs: input.timeoutMs,

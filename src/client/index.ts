@@ -1,13 +1,24 @@
 import { createVisionBridgeSendSession } from './bridge.js'
-import type { BridgeConversation, BridgeCurrentModelResolver } from './bridge.js'
-import { projectBridgeContent } from './chat-render.js'
+import type { BridgeConversation } from './bridge.js'
+import { BRIDGE_REFERENCE_FIELD, projectBridgeContent } from './chat-render.js'
 import type { ChatContentBlock } from './chat-render.js'
 import { createBridgeHistoryImageLoader } from './image-loader.js'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { PACKAGE_NAME } from '../package-name.js'
+import {
+  ProviderSettingsCard,
+  SETTINGS_CARD_LOCALE_NAMESPACE,
+  settingsCardLocales,
+} from './settings-card-view.js'
+import type { SettingsCardApi } from './settings-card.js'
+import {
+  VISION_BRIDGE_SETTINGS_NAMESPACE,
+  type VisionBridgeSettings,
+} from '../settings-contract.js'
 import { createElement } from 'react'
 import type { ElementType, ReactElement } from 'react'
 
-export const inject = ['conversation', 'connection', 'slots']
+export const inject = ['conversation', 'connection', 'slots', 'settingsScope', 'locale']
 
 interface ClientContextLike {
   get(name: string): unknown
@@ -26,6 +37,16 @@ interface SlotsServiceLike {
     component: (props: never) => unknown,
   ): () => void
   entries(name: string): readonly SlotEntryLike[]
+  inject(name: string, install: () => unknown): unknown
+}
+
+interface SettingsScopeBinderLike {
+  bind<T>(spec: { readonly namespace: string }): SettingsScope<T>
+}
+
+interface LocaleServiceLike {
+  register(namespace: string, dictionaries: Readonly<Record<string, Readonly<Record<string, string>>>>): () => void
+  bind(namespace: string): (key: string) => string
 }
 
 const PATCH_MARKER = Symbol.for(`${PACKAGE_NAME}.client.send-session`)
@@ -39,31 +60,20 @@ const REGISTRANT = `${PACKAGE_NAME}/client`
 const SHADOW_PRIORITY = -100
 
 type PatchableConversation = BridgeConversation & {
-  [PATCH_MARKER]?: BridgeConversation['sendSession']
+  resolveImage(sessionId: string, attachment: unknown): Promise<string>
+  [PATCH_MARKER]?: {
+    readonly wrapped: BridgeConversation['sendSession']
+    readonly resolveImage: PatchableConversation['resolveImage']
+  }
 }
 
 interface ClientConnectionLike {
-  readonly api: {
-    readonly sessions: {
-      models(request: { readonly sessionId: string }): Promise<{
-        readonly result: {
-          readonly ok: true
-          readonly value: {
-            readonly current: { readonly provider: string; readonly model: string }
-          }
-        } | {
-          readonly ok: false
-          readonly error: { readonly code: string; readonly message: string }
-        }
-      }>
-    }
-  }
+  readonly api: SettingsCardApi
 }
 
 /** One keyed chat-node slot render occurrence: the stock owner props plus the node. */
 type ChatNodeProps = {
   node: { kind: string; data: { content?: readonly ChatContentBlock[] } }
-  loadImage?: (attachment: never) => Promise<string>
   t?: (key: string, params?: Record<string, unknown>) => string
 } & Record<string, unknown>
 
@@ -73,12 +83,13 @@ function isConversation(value: unknown): value is PatchableConversation {
   return typeof conversation.sendSession === 'function'
     && typeof conversation.draftImages === 'function'
     && typeof conversation.releaseDraftImages === 'function'
+    && typeof (conversation as Partial<PatchableConversation>).resolveImage === 'function'
 }
 
 /**
  * Cordis services are caller-traced proxies. Assigning a method on that proxy
  * creates a caller shadow rather than changing the root singleton used by the
- * composer. rc.6 exposes the canonical target through cordis.original; plain
+ * composer. rc.2 exposes the canonical target through cordis.original; plain
  * test doubles and future untraced services fall back to the supplied value.
  */
 function canonicalConversation(value: unknown): PatchableConversation | undefined {
@@ -87,34 +98,19 @@ function canonicalConversation(value: unknown): PatchableConversation | undefine
   return isConversation(original) ? original : value
 }
 
-function currentModelResolver(value: unknown): BridgeCurrentModelResolver | undefined {
+function settingsScopeBinder(value: unknown): SettingsScopeBinderLike | undefined {
   if (value === null || typeof value !== 'object') return undefined
-  const connection = value as Partial<ClientConnectionLike>
-  if (typeof connection.api?.sessions?.models !== 'function') return undefined
-  return async (sessionId) => {
-    const { result } = await connection.api!.sessions.models({ sessionId })
-    if (!result.ok) {
-      throw new Error(`Vision Bridge could not read the current session model (${result.error.code}).`)
-    }
-    const { provider, model } = result.value.current
-    if (!provider || !model) throw new Error('Vision Bridge received an invalid current model selection.')
-    return { provider, model }
-  }
+  return typeof (value as Partial<SettingsScopeBinderLike>).bind === 'function'
+    ? value as SettingsScopeBinderLike
+    : undefined
 }
 
-/**
- * A Cordis trace proxy resolves prototype methods before binding them to a
- * caller shadow. Patch the descriptor owner so every caller context observes
- * the bridge, including the conversation package's rootCtx lookup.
- */
-function sendSessionOwner(conversation: PatchableConversation): PatchableConversation {
-  let current: object | null = conversation
-  while (current !== null) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, 'sendSession')
-    if (typeof descriptor?.value === 'function') return current as PatchableConversation
-    current = Object.getPrototypeOf(current)
-  }
-  throw new Error('vision-bridge/client: conversation sendSession descriptor is unavailable')
+function localeService(value: unknown): LocaleServiceLike | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const candidate = value as Partial<LocaleServiceLike>
+  return typeof candidate.register === 'function' && typeof candidate.bind === 'function'
+    ? value as LocaleServiceLike
+    : undefined
 }
 
 /**
@@ -139,7 +135,6 @@ function stockRendererFor(slots: SlotsServiceLike, key: string): ElementType | n
 function bridgeChatNodeRenderer(
   slots: SlotsServiceLike,
   key: string,
-  loadBridgeImage: (attachment: unknown) => Promise<string>,
 ) {
   const render = (props: never): unknown => {
     const nodeProps = props as unknown as ChatNodeProps
@@ -151,7 +146,6 @@ function bridgeChatNodeRenderer(
     if (stock === undefined || stock === null) return null
     return renderStock(stock, {
       ...nodeProps,
-      loadImage: loadBridgeImage,
       node: { ...nodeProps.node, data: { ...nodeProps.node.data, content: projection.content } },
     })
   }
@@ -186,17 +180,48 @@ function stockRenderer(slots: SlotsServiceLike, key: string, props: never): unkn
 function registerChatNodePresentation(
   ctx: ClientContextLike,
   slots: SlotsServiceLike,
-  loadBridgeImage: (attachment: unknown) => Promise<string>,
 ): void {
   const disposers = (['user', 'steering'] as const).map((key) =>
     slots.register(
       { name: CHAT_NODE_SLOT, key, priority: SHADOW_PRIORITY, locale: CONVERSATION_NS, registrant: REGISTRANT },
-      bridgeChatNodeRenderer(slots, key, loadBridgeImage),
+      bridgeChatNodeRenderer(slots, key),
     ),
   )
   ctx.effect(() => () => {
     for (const dispose of disposers) dispose()
   }, 'vision-bridge: chat node presentation')
+}
+
+/** Contribute this namespace's own card to the official plugin configuration slot. */
+function registerProviderSettingsCard(
+  ctx: ClientContextLike,
+  slots: SlotsServiceLike,
+  settingsScope: SettingsScopeBinderLike,
+  locale: LocaleServiceLike,
+  api: SettingsCardApi,
+): void {
+  const scope = settingsScope.bind<VisionBridgeSettings>({ namespace: VISION_BRIDGE_SETTINGS_NAMESPACE })
+  const fallbackT = locale.bind(SETTINGS_CARD_LOCALE_NAMESPACE)
+  ctx.effect(
+    () => locale.register(SETTINGS_CARD_LOCALE_NAMESPACE, settingsCardLocales),
+    'vision-bridge: settings dictionaries',
+  )
+  slots.inject('settings.plugin.item', () => slots.register(
+    {
+      name: 'settings.plugin.item',
+      key: VISION_BRIDGE_SETTINGS_NAMESPACE,
+      locale: SETTINGS_CARD_LOCALE_NAMESPACE,
+      registrant: REGISTRANT,
+    },
+    (slotProps: never) => {
+      const injectedT = (slotProps as unknown as { readonly t?: (key: string) => string }).t
+      return createElement(ProviderSettingsCard, {
+        scope,
+        api,
+        t: (injectedT ?? fallbackT) as (key: Parameters<typeof fallbackT>[0]) => string,
+      })
+    },
+  ))
 }
 
 function markActive(): () => void {
@@ -212,32 +237,67 @@ function markActive(): () => void {
 export function apply(ctx: ClientContextLike): void {
   const conversation = canonicalConversation(ctx.get('conversation'))
   if (conversation === undefined) {
-    throw new Error('vision-bridge/client: incompatible conversation service; expected DSH 0.1.0-rc.6')
+    throw new Error('vision-bridge/client: incompatible conversation service; expected DSH 0.1.1-rc.2')
   }
-  const resolveCurrentModel = currentModelResolver(ctx.get('connection'))
-  if (resolveCurrentModel === undefined) {
-    throw new Error('vision-bridge/client: incompatible connection service; expected DSH 0.1.0-rc.6')
-  }
+  const connection = ctx.get('connection') as ClientConnectionLike | undefined
   const slots = ctx.get('slots')
   if (slots === undefined || typeof (slots as SlotsServiceLike).register !== 'function'
-    || typeof (slots as SlotsServiceLike).entries !== 'function') {
-    throw new Error('vision-bridge/client: incompatible slots service; expected DSH 0.1.0-rc.6')
+    || typeof (slots as SlotsServiceLike).entries !== 'function'
+    || typeof (slots as SlotsServiceLike).inject !== 'function') {
+    throw new Error('vision-bridge/client: incompatible slots service; expected DSH 0.1.1-rc.2')
+  }
+  const settingsScope = settingsScopeBinder(ctx.get('settingsScope'))
+  if (settingsScope === undefined) {
+    throw new Error('vision-bridge/client: incompatible settings scope; expected DSH 0.1.1-rc.2')
+  }
+  const locale = localeService(ctx.get('locale'))
+  if (locale === undefined) {
+    throw new Error('vision-bridge/client: incompatible locale service; expected DSH 0.1.1-rc.2')
+  }
+  if (connection === undefined) {
+    throw new Error('vision-bridge/client: incompatible connection service; expected DSH 0.1.1-rc.2')
   }
 
-  const owner = sendSessionOwner(conversation)
-  if (owner[PATCH_MARKER] !== undefined) {
+  if (Object.hasOwn(conversation, PATCH_MARKER)) {
     throw new Error('vision-bridge/client: pasted-image bridge is already installed')
   }
-  const original = owner.sendSession
-  const wrapped = createVisionBridgeSendSession(conversation, resolveCurrentModel)
+  const originalDescriptor = Object.getOwnPropertyDescriptor(conversation, 'sendSession')
+  const original = conversation.sendSession
+  const resolveImageDescriptor = Object.getOwnPropertyDescriptor(conversation, 'resolveImage')
+  const originalResolveImage = conversation.resolveImage
+  const bridge = createVisionBridgeSendSession(conversation)
+  let active = true
+  const wrapped: BridgeConversation['sendSession'] = (session, text, imageIds, mode, signal) => {
+    if (!active) return original.call(conversation, session, text, imageIds, mode, signal)
+    return bridge(session, text, imageIds, mode, signal)
+  }
   const historyImages = createBridgeHistoryImageLoader()
-  owner[PATCH_MARKER] = original
-  owner.sendSession = wrapped
+  const wrappedResolveImage: PatchableConversation['resolveImage'] = (sessionId, attachment) => {
+    if (!active || attachment === null || typeof attachment !== 'object'
+      || typeof (attachment as Record<PropertyKey, unknown>)[BRIDGE_REFERENCE_FIELD] !== 'string') {
+      return originalResolveImage.call(conversation, sessionId, attachment)
+    }
+    return historyImages.load(attachment)
+  }
+  registerProviderSettingsCard(ctx, slots as SlotsServiceLike, settingsScope, locale, connection.api)
+  conversation[PATCH_MARKER] = Object.freeze({ wrapped, resolveImage: wrappedResolveImage })
+  conversation.sendSession = wrapped
+  conversation.resolveImage = wrappedResolveImage
   const clearActive = markActive()
-  registerChatNodePresentation(ctx, slots as SlotsServiceLike, historyImages.load)
+  registerChatNodePresentation(ctx, slots as SlotsServiceLike)
   ctx.effect(() => () => {
-    if (owner.sendSession === wrapped) owner.sendSession = original
-    delete owner[PATCH_MARKER]
+    // An outer wrapper may still hold this function. Make such a reference an
+    // inert pass-through before restoring the property when we remain on top.
+    active = false
+    if (conversation.sendSession === wrapped) {
+      if (originalDescriptor === undefined) Reflect.deleteProperty(conversation, 'sendSession')
+      else Object.defineProperty(conversation, 'sendSession', originalDescriptor)
+    }
+    if (conversation.resolveImage === wrappedResolveImage) {
+      if (resolveImageDescriptor === undefined) Reflect.deleteProperty(conversation, 'resolveImage')
+      else Object.defineProperty(conversation, 'resolveImage', resolveImageDescriptor)
+    }
+    delete conversation[PATCH_MARKER]
     historyImages.dispose()
     clearActive()
   }, 'vision-bridge: WebUI pasted-image bridge')
@@ -255,8 +315,6 @@ export {
 export { createBridgeHistoryImageLoader } from './image-loader.js'
 export type {
   BridgeConversation,
-  BridgeCurrentModel,
-  BridgeCurrentModelResolver,
   BridgeDraftAttachment,
   BridgeSession,
   BridgeSubmitMode,

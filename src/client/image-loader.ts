@@ -43,7 +43,9 @@ function renderableAttachment(value: unknown): BridgeRenderableAttachment {
  * The official DSH reader cannot authorize these objects because text-only
  * routes intentionally keep their attachment references inside text blocks.
  */
-export function createBridgeHistoryImageLoader(fetcher: typeof fetch = fetch): BridgeHistoryImageLoader {
+export function createBridgeHistoryImageLoader(
+  fetcher: typeof fetch = fetch,
+): BridgeHistoryImageLoader {
   const pending = new Map<string, Promise<string>>()
   const resolved = new Map<string, { readonly url: string; readonly bytes: number }>()
   let resolvedBytes = 0

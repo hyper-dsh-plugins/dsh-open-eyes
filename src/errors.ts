@@ -1,6 +1,7 @@
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 
 export const VISION_ERROR_CODES = [
+  'VISION_DISABLED',
   'VISION_NOT_CONFIGURED',
   'VISION_PROVIDER_NOT_FOUND',
   'VISION_CREDENTIAL_MISSING',

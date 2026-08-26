@@ -20,11 +20,38 @@ describe('configuration', () => {
   it('accepts an empty, dormant provider list and applies defaults', () => {
     const config = parse({})
     expect(config.providers).toEqual([])
+    expect(config.enabled).toBe(true)
+    expect(config.preference).toBe('')
+    expect(config.visualAnalysis).toBe('default')
+    expect(config.focusAreas).toEqual([])
     expect(config.defaultProvider).toBeUndefined()
-    expect(config.timeoutMs).toBe(90_000)
+    expect(config.timeoutMs).toBe(300_000)
     expect(config.maxImageBytes).toBe(10 * 1024 * 1024)
-    expect(config.maxRetries).toBe(0)
+    expect(config.maxRetries).toBe(2)
     expect(config.allowRemoteUrls).toBe(false)
+  })
+
+  it('accepts a statically disabled starting state for newly created sessions', () => {
+    expect(parse({ enabled: false }).enabled).toBe(false)
+  })
+
+  it('accepts a concise global visual-analysis preference and trims it', () => {
+    expect(parse({ preference: '  Focus on visible error codes.  ' }).preference).toBe(
+      'Focus on visible error codes.',
+    )
+    expect(() => parse({ preference: 'x'.repeat(2_001) })).toThrow(/preference/)
+  })
+
+  it('normalizes the protocol-neutral visual-analysis presets', () => {
+    expect(parse({
+      visualAnalysis: 'deep',
+      focusAreas: ['details', 'text', 'details'],
+    } as never)).toMatchObject({
+      visualAnalysis: 'deep',
+      focusAreas: ['text', 'details'],
+    })
+    expect(() => parse({ visualAnalysis: 'balanced' } as never)).toThrow(/visualAnalysis/)
+    expect(() => parse({ focusAreas: ['unknown'] } as never)).toThrow(/focusAreas/)
   })
 
   it('automatically selects the only provider and resolves protocol defaults', () => {

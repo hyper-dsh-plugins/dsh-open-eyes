@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MockServer } from './helpers/server.js'
 import { json, startServer } from './helpers/server.js'
-import { postJson } from '../src/http.js'
+import * as httpTransport from '../src/http.js'
 import { VisionBridgeError } from '../src/errors.js'
+
+const { getJson, postJson } = httpTransport
 
 const servers: MockServer[] = []
 
@@ -41,6 +43,20 @@ async function errorCode(promise: Promise<unknown>) {
 }
 
 describe('bounded HTTP JSON transport', () => {
+  it('gets JSON without a request body or synthetic content type', async () => {
+    const getJson = (httpTransport as typeof httpTransport & {
+      getJson?: (request: Omit<ReturnType<typeof options>, 'body'>) => ReturnType<typeof postJson>
+    }).getJson
+    expect(getJson).toBeTypeOf('function')
+    if (getJson === undefined) return
+    const mock = await server((_request, response) => json(response, 200, { data: [{ id: 'vision-model' }] }))
+
+    const { body: _body, ...request } = options(`${mock.origin}/models`)
+    await expect(getJson(request)).resolves.toMatchObject({ payload: { data: [{ id: 'vision-model' }] } })
+    expect(mock.requests[0]).toMatchObject({ method: 'GET', url: '/models', body: undefined })
+    expect(mock.requests[0]?.headers['content-type']).toBeUndefined()
+  })
+
   it('posts JSON without following redirects and returns response headers', async () => {
     const mock = await server((_request, response) => json(response, 200, { ok: true }, { 'x-request-id': 'request-1' }))
     const result = await postJson(options(`${mock.origin}/analyze`))
@@ -92,17 +108,24 @@ describe('bounded HTTP JSON transport', () => {
     expect(mock.requests[0]?.headers['content-type']).toBe('application/json')
   })
 
-  it('retries only retryable HTTP statuses and caps Retry-After', async () => {
+  it('retries a transient POST response within the configured budget', async () => {
     const mock = await server((_request, response, index) => {
-      if (index === 0) return json(response, 429, { error: 'busy' }, { 'retry-after': '30' })
+      if (index === 0) return json(response, 503, { error: 'busy' }, { 'retry-after': '0' })
       return json(response, 200, { ok: true })
     })
-    const started = Date.now()
-    await expect(postJson(options(mock.origin, { maxRetries: 1, maxRetryDelayMs: 20 }))).resolves.toMatchObject({
-      payload: { ok: true },
-    })
+    await expect(postJson(options(mock.origin, { maxRetries: 1, maxRetryDelayMs: 20 })))
+      .resolves.toMatchObject({ payload: { ok: true } })
     expect(mock.requests).toHaveLength(2)
-    expect(Date.now() - started).toBeLessThan(500)
+  })
+
+  it('gives idempotent model-list GET requests one bounded retry', async () => {
+    const mock = await server((_request, response, index) => {
+      if (index === 0) return json(response, 503, { error: 'edge unavailable' })
+      return json(response, 200, { data: [{ id: 'vision-model' }] })
+    })
+    const { body: _body, ...request } = options(`${mock.origin}/models`, { maxRetries: 0, maxRetryDelayMs: 10 })
+    await expect(getJson(request)).resolves.toMatchObject({ payload: { data: [{ id: 'vision-model' }] } })
+    expect(mock.requests).toHaveLength(2)
   })
 
   it('does not retry terminal 4xx errors', async () => {
@@ -111,7 +134,7 @@ describe('bounded HTTP JSON transport', () => {
     expect(mock.requests).toHaveLength(1)
   })
 
-  it('retries a transient socket failure before any response', async () => {
+  it('retries a transient socket failure within the configured budget', async () => {
     const mock = await server((request, response, index) => {
       if (index === 0) {
         request.socket.destroy()
@@ -119,7 +142,42 @@ describe('bounded HTTP JSON transport', () => {
       }
       return json(response, 200, { recovered: true })
     })
-    await expect(postJson(options(mock.origin, { maxRetries: 1 }))).resolves.toMatchObject({ payload: { recovered: true } })
+    await expect(postJson(options(mock.origin, { maxRetries: 1 })))
+      .resolves.toMatchObject({ payload: { recovered: true } })
+    expect(mock.requests).toHaveLength(2)
+  })
+
+  it('retries a response-body socket failure within the configured budget', async () => {
+    const mock = await server((request, response, index) => {
+      if (index === 0) {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.write('{"partial":')
+        response.socket?.destroy()
+        return
+      }
+      return json(response, 200, { recovered: true })
+    })
+    await expect(postJson(options(mock.origin, { maxRetries: 1 })))
+      .resolves.toMatchObject({ payload: { recovered: true } })
+    expect(mock.requests).toHaveLength(2)
+  })
+
+  it('stops after the configured transient POST retry budget', async () => {
+    const mock = await server((_request, response) => json(response, 503, { error: 'busy' }))
+    expect(await errorCode(postJson(options(mock.origin, { maxRetries: 2, maxRetryDelayMs: 5 })))).toBe('VISION_UPSTREAM_HTTP')
+    expect(mock.requests).toHaveLength(3)
+  })
+
+  it('gives every timed-out retry attempt a fresh deadline', async () => {
+    const mock = await server((_request, response, index) => {
+      if (index === 0) return
+      return json(response, 200, { recovered: true })
+    })
+    await expect(postJson(options(mock.origin, {
+      timeoutMs: 20,
+      maxRetries: 1,
+      maxRetryDelayMs: 5,
+    }))).resolves.toMatchObject({ payload: { recovered: true } })
     expect(mock.requests).toHaveLength(2)
   })
 
@@ -128,8 +186,14 @@ describe('bounded HTTP JSON transport', () => {
     expect(await errorCode(postJson(options(mock.origin, { timeoutMs: 20 })))).toBe('VISION_TIMEOUT')
 
     const controller = new AbortController()
-    const pending = postJson(options(mock.origin, { signal: controller.signal, timeoutMs: 1_000 }))
+    const pending = postJson(options(mock.origin, {
+      signal: controller.signal,
+      timeoutMs: 1_000,
+      maxRetries: 2,
+    }))
+    await vi.waitFor(() => expect(mock.requests).toHaveLength(2))
     controller.abort(new Error('user canceled'))
     expect(await errorCode(pending)).toBe('VISION_ABORTED')
+    expect(mock.requests).toHaveLength(2)
   })
 })

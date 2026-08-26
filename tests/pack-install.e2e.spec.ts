@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -14,6 +14,7 @@ suite('packed package install in an isolated DSH web profile', () => {
   let root: string
   let dshHome: string
   let tarball: string
+  let openFileTarball: string
   let tarEntries: string[]
   let web: ChildProcessWithoutNullStreams | undefined
 
@@ -28,6 +29,17 @@ suite('packed package install in an isolated DSH web profile', () => {
     tarball = path.join(root, packed[0]!.filename)
     const listing = await run('tar', ['-tzf', tarball], { maxBuffer: 10 * 1024 * 1024 })
     tarEntries = listing.stdout.trim().split('\n')
+    const suppliedOpenFile = process.env.DSH_OPEN_FILE_TARBALL
+    if (suppliedOpenFile !== undefined) {
+      openFileTarball = path.resolve(suppliedOpenFile)
+      await access(openFileTarball)
+    } else {
+      const packedOpenFile = await run('npm', [
+        'pack', 'dsh-open-file@0.1.1-rc.2', '--ignore-scripts', '--json', '--pack-destination', root,
+      ], { cwd: root, maxBuffer: 10 * 1024 * 1024 })
+      const openFilePackage = JSON.parse(packedOpenFile.stdout) as Array<{ filename: string }>
+      openFileTarball = path.join(root, openFilePackage[0]!.filename)
+    }
   })
 
   afterAll(async () => {
@@ -66,6 +78,16 @@ suite('packed package install in an isolated DSH web profile', () => {
       web!.once('exit', code => finish(new Error(`packed Web profile exited early (${String(code)}): ${output}`)))
       web!.once('error', error => finish(error))
     })
+  }
+
+  async function stopWeb(): Promise<void> {
+    const activeWeb = web
+    if (activeWeb === undefined) return
+    if (activeWeb.exitCode === null) {
+      activeWeb.kill('SIGINT')
+      await onceExit(activeWeb)
+    }
+    web = undefined
   }
 
   it('contains only the release allowlist and every runtime asset', async () => {
@@ -110,7 +132,7 @@ suite('packed package install in an isolated DSH web profile', () => {
     expect(index.status).toBe(200)
     const html = await index.text()
     expect(html).toContain('"id":"dsh-open-eyes"')
-    expect(html).toContain('"inject":["@deepseek-ai/dsh-client-connection","@deepseek-ai/dsh-client-ui-conversation"]')
+    expect(html).toContain('"inject":["@deepseek-ai/dsh-client-connection","@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-ui-conversation","@deepseek-ai/dsh-client-ui-settings","@deepseek-ai/dsh-client-ui-settings-plugins"]')
     const bundleUrl = /"id":"dsh-open-eyes","url":"([^"]+\/client\.js\?rev=[^"]+)"/u.exec(html)?.[1]
     expect(bundleUrl).toBeDefined()
     const bundle = await fetch(new URL(bundleUrl!, origin))
@@ -119,9 +141,17 @@ suite('packed package install in an isolated DSH web profile', () => {
     expect(bundleText).toContain('id: "dsh-open-eyes"')
     expect(bundleText).toContain('/vision-bridge/v1/web-image-route')
     expect(bundleText).toContain('/vision-bridge/v1/web-attachment')
+    expect(bundleText).toContain('/vision-bridge/v1/provider-validation')
+    expect(bundleText).toContain('/vision-bridge/v1/provider-models')
     expect(bundleText).toContain('Attached image')
     expect(bundleText).toContain('require("react")')
     expect(bundleText).toContain('react.createElement)(stock, props)')
+    expect(bundleText).toContain('settings.plugin.item')
+    expect(bundleText).toContain('credentials.set')
+    expect([...bundleText.matchAll(/require\("([^"]+)"\)/gu)].map(match => match[1])).toEqual([
+      'react',
+      '@deepseek-ai/dsh-client-ui-primitives',
+    ])
     expect(bundleText).not.toContain('Vision Bridge WebUI handoff')
     expect(bundleText).not.toContain('node:fs')
     const bridgeRoute = await fetch(`${origin}/vision-bridge/v1/web-drafts`)
@@ -130,12 +160,12 @@ suite('packed package install in an isolated DSH web profile', () => {
     expect(capabilityRoute.status).toBe(405)
     const attachmentRoute = await fetch(`${origin}/vision-bridge/v1/web-attachment`)
     expect(attachmentRoute.status).toBe(405)
+    const validationRoute = await fetch(`${origin}/vision-bridge/v1/provider-validation`)
+    expect(validationRoute.status).toBe(405)
+    const modelsRoute = await fetch(`${origin}/vision-bridge/v1/provider-models`)
+    expect(modelsRoute.status).toBe(405)
 
-    const activeWeb = web
-    if (activeWeb === undefined) throw new Error('packed Web process was not retained')
-    activeWeb.kill('SIGINT')
-    await onceExit(activeWeb)
-    web = undefined
+    await stopWeb()
 
     await run(dsh, ['plugin', '--profile', 'web', 'remove', 'dsh-open-eyes'], {
       cwd: new URL('..', import.meta.url),
@@ -156,9 +186,59 @@ suite('packed package install in an isolated DSH web profile', () => {
       dsh: {
         client: {
           platform: 'web',
-          inject: ['@deepseek-ai/dsh-client-connection', '@deepseek-ai/dsh-client-ui-conversation'],
+          inject: [
+            '@deepseek-ai/dsh-client-connection',
+            '@deepseek-ai/dsh-client-locale',
+            '@deepseek-ai/dsh-client-runtime',
+            '@deepseek-ai/dsh-client-ui-conversation',
+            '@deepseek-ai/dsh-client-ui-settings',
+            '@deepseek-ai/dsh-client-ui-settings-plugins',
+          ],
         },
       },
     })
   }, 120_000)
+
+  it.each(['dsh-open-file first', 'dsh-open-eyes first'] as const)(
+    'boots and removes both client plugins when installed with %s', async (label) => {
+    const dsh = path.resolve('node_modules/.bin/dsh')
+    const orderId = label === 'dsh-open-file first' ? 'file-first' : 'eyes-first'
+    const environment = { ...process.env, DSH_HOME: path.join(root, `dsh-home-${orderId}`) }
+    const packages = label === 'dsh-open-file first'
+      ? [openFileTarball, tarball]
+      : [tarball, openFileTarball]
+    for (const packageTarball of packages) {
+      await run(dsh, ['plugin', '--profile', 'web', 'add', packageTarball], {
+        cwd: new URL('..', import.meta.url),
+        env: environment,
+        maxBuffer: 20 * 1024 * 1024,
+      })
+    }
+
+    const installed = await run(dsh, ['--profile', 'web', '--dump-config'], {
+      cwd: new URL('..', import.meta.url),
+      env: environment,
+      maxBuffer: 20 * 1024 * 1024,
+    })
+    expect(installed.stdout).toContain('id: vision-bridge')
+
+    const origin = await startWeb(dsh, environment)
+    const index = await fetch(`${origin}/`)
+    expect(index.status).toBe(200)
+    const html = await index.text()
+    expect(html).toContain('"id":"dsh-open-eyes"')
+    expect(html).toContain('"id":"dsh-open-file"')
+    await stopWeb()
+
+    await run(dsh, ['plugin', '--profile', 'web', 'remove', 'dsh-open-eyes'], {
+      cwd: new URL('..', import.meta.url), env: environment, maxBuffer: 20 * 1024 * 1024,
+    })
+    await run(dsh, ['plugin', '--profile', 'web', 'remove', 'dsh-open-file'], {
+      cwd: new URL('..', import.meta.url), env: environment, maxBuffer: 20 * 1024 * 1024,
+    })
+    const removed = await run(dsh, ['--profile', 'web', '--dump-config'], {
+      cwd: new URL('..', import.meta.url), env: environment, maxBuffer: 20 * 1024 * 1024,
+    })
+    expect(removed.stdout).not.toContain('id: vision-bridge')
+  }, 180_000)
 })

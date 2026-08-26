@@ -86,6 +86,14 @@ describe('Anthropic Messages adapter', () => {
     })
   })
 
+  it('accepts a base URL that already contains the Messages endpoint', async () => {
+    const mock = await server((_request, response) => json(response, 200, { content: [{ type: 'text', text: 'answer' }] }))
+
+    await analyzeAnthropicMessages(request(provider('anthropic-messages', `${mock.origin}/gateway/v1/messages`)))
+
+    expect(mock.requests[0]?.url).toBe('/gateway/v1/messages')
+  })
+
   it('rejects invalid/empty content and reserved body overrides', async () => {
     const mock = await server((_request, response) => json(response, 200, { content: [{ type: 'thinking', thinking: 'x' }] }))
     const config = provider('anthropic-messages', mock.origin)

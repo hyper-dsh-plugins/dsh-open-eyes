@@ -5,13 +5,24 @@ import type { ResolvedConfig } from './config.js'
 import { MAX_TOTAL_LOCAL_IMAGE_BYTES } from './config.js'
 import { takeCodePoints, VisionBridgeError } from './errors.js'
 import { detectImageMime } from './mime.js'
+import {
+  WEB_PROVIDER_VALIDATION_ERROR_CODES,
+  type WebProviderValidationDiagnostic,
+  type WebProviderModelsDraft,
+} from './web-contract.js'
+import { AUTH_MODES, PROTOCOLS } from './provider-contract.js'
 
-export { WEB_ATTACHMENT_ENDPOINT, WEB_DRAFT_ENDPOINT, WEB_IMAGE_ROUTE_ENDPOINT } from './web-contract.js'
+export {
+  WEB_ATTACHMENT_ENDPOINT,
+  WEB_DRAFT_ENDPOINT,
+  WEB_IMAGE_ROUTE_ENDPOINT,
+  WEB_PROVIDER_MODELS_ENDPOINT,
+  WEB_PROVIDER_VALIDATION_ENDPOINT,
+} from './web-contract.js'
 const WEB_REFERENCE_PREFIX = 'vision-bridge://attachment/v1/'
 const MAX_SESSION_ID_CHARS = 512
 const MAX_ATTACHMENT_ID_CHARS = 1_024
 const MAX_FILE_NAME_CHARS = 255
-const MAX_MODEL_ID_CHARS = 1_024
 const REQUEST_OVERHEAD_BYTES = 64 * 1024
 
 type AttachmentWriter = {
@@ -33,21 +44,27 @@ type SessionEventSource = {
 export interface WebDraftHandlerOptions {
   readonly attachments: AttachmentWriter
   readonly hasSession: (sessionId: string) => boolean
-  readonly config: ResolvedConfig
+  readonly isEnabled?: (sessionId: string) => boolean
+  readonly config: ResolvedConfig | (() => ResolvedConfig)
 }
 
 export interface WebImageRouteHandlerOptions {
-  readonly hasSession: (sessionId: string) => boolean
-  readonly resolveModelInfo: (
-    provider: string,
-    model: string,
-  ) => Promise<{ readonly inputModalities?: readonly string[] }>
-  readonly config: ResolvedConfig
+  /** Undefined means unknown session; false is native pass-through. */
+  readonly isEnabled: (sessionId: string) => boolean | undefined
+  readonly config: ResolvedConfig | (() => ResolvedConfig)
 }
 
 export interface WebAttachmentHandlerOptions {
   readonly attachments: AttachmentReader
   readonly session: (sessionId: string) => SessionEventSource | undefined
+}
+
+export interface WebProviderValidationHandlerOptions {
+  readonly validate: (providerId: string, signal: AbortSignal) => Promise<void>
+}
+
+export interface WebProviderModelsHandlerOptions {
+  readonly models: (draft: WebProviderModelsDraft, signal: AbortSignal) => Promise<readonly string[]>
 }
 
 interface BrowserImageInput {
@@ -209,6 +226,10 @@ function maxRequestBytes(config: ResolvedConfig): number {
   return Math.ceil((config.maxImageBytes * config.maxImages * 4) / 3) + REQUEST_OVERHEAD_BYTES
 }
 
+function currentConfig(source: ResolvedConfig | (() => ResolvedConfig)): ResolvedConfig {
+  return typeof source === 'function' ? source() : source
+}
+
 async function readJson(req: IncomingMessage, maximum: number): Promise<unknown> {
   const declared = req.headers['content-length']
   if (declared !== undefined) {
@@ -307,6 +328,144 @@ function readiness(config: ResolvedConfig) {
   }
 }
 
+function providerValidationCode(error: unknown): string | undefined {
+  if (error === null || typeof error !== 'object') return undefined
+  const code = (error as { readonly code?: unknown }).code
+  return typeof code === 'string'
+    && (WEB_PROVIDER_VALIDATION_ERROR_CODES as readonly string[]).includes(code)
+    ? code
+    : undefined
+}
+
+function providerValidationDiagnostic(
+  error: unknown,
+  code: string,
+): WebProviderValidationDiagnostic | undefined {
+  const message = error !== null && typeof error === 'object'
+    && typeof (error as { readonly message?: unknown }).message === 'string'
+    ? (error as { readonly message: string }).message
+    : ''
+  if (code === 'VISION_UPSTREAM_HTTP') {
+    const match = /^vision provider returned HTTP ([1-5][0-9]{2})(?::|$)/u.exec(message)
+    return {
+      reason: 'http',
+      ...(match === null ? {} : { httpStatus: Number(match[1]) }),
+    }
+  }
+  if (code === 'VISION_RESPONSE_TOO_LARGE') return { reason: 'response-too-large' }
+  if (code !== 'VISION_UPSTREAM_PROTOCOL') return undefined
+  if (message === 'vision provider network request failed') return { reason: 'network' }
+  if (message === 'vision provider returned a non-JSON response') return { reason: 'invalid-json' }
+  return { reason: 'invalid-response' }
+}
+
+/** Validate one saved provider without admitting secrets, prompts, images, or session state. */
+export function createWebProviderValidationHandler(options: WebProviderValidationHandlerOptions) {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const controller = new AbortController()
+    const onAborted = (): void => { controller.abort() }
+    req.once('aborted', onAborted)
+    try {
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { error: 'VISION_WEB_METHOD_NOT_ALLOWED' }, { allow: 'POST' })
+        return
+      }
+      if (!sameOrigin(req)) httpError(403, 'VISION_WEB_ORIGIN_REJECTED')
+      const contentType = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase()
+      if (contentType !== 'application/json') httpError(415, 'VISION_WEB_CONTENT_TYPE_REJECTED')
+      const body = await readJson(req, REQUEST_OVERHEAD_BYTES)
+      if (!isRecord(body) || Object.keys(body).length !== 1
+        || typeof body.providerId !== 'string'
+        || !/^[a-z0-9][a-z0-9._-]*$/u.test(body.providerId)) {
+        httpError(400, 'VISION_WEB_INVALID_PROVIDER_VALIDATION')
+      }
+      await options.validate(body.providerId as string, controller.signal)
+      writeJson(res, 200, { ok: true })
+    } catch (error) {
+      if (res.headersSent || res.destroyed) return
+      if (error instanceof WebDraftHttpError) {
+        writeJson(res, error.status, { error: error.code })
+        return
+      }
+      const code = providerValidationCode(error)
+      if (code !== undefined) {
+        const status = code === 'VISION_CREDENTIAL_MISSING' ? 424 : 502
+        const diagnostic = providerValidationDiagnostic(error, code)
+        writeJson(res, status, {
+          ok: false,
+          error: code,
+          ...(diagnostic === undefined ? {} : { diagnostic }),
+        })
+        return
+      }
+      writeJson(res, 500, { ok: false, error: 'VISION_WEB_INTERNAL' })
+    } finally {
+      req.off('aborted', onAborted)
+    }
+  }
+}
+
+function providerModelsDraft(value: unknown): WebProviderModelsDraft {
+  if (!isRecord(value)) httpError(400, 'VISION_WEB_INVALID_PROVIDER_MODELS')
+  const allowed = new Set(['providerId', 'protocol', 'baseUrl', 'endpointPath', 'authMode', 'credential'])
+  if (Object.keys(value).some(key => !allowed.has(key))
+    || typeof value.providerId !== 'string'
+    || !/^[a-z0-9][a-z0-9._-]*$/u.test(value.providerId)
+    || typeof value.protocol !== 'string'
+    || !(PROTOCOLS as readonly string[]).includes(value.protocol)
+    || typeof value.baseUrl !== 'string' || value.baseUrl.length === 0 || value.baseUrl.length > 8_192
+    || (value.endpointPath !== undefined && (typeof value.endpointPath !== 'string' || value.endpointPath.length > 2_048))
+    || (value.authMode !== undefined && (typeof value.authMode !== 'string'
+      || !(AUTH_MODES as readonly string[]).includes(value.authMode)))
+    || (value.credential !== undefined && (typeof value.credential !== 'string'
+      || value.credential.length === 0 || value.credential.length > 2_048))) {
+    httpError(400, 'VISION_WEB_INVALID_PROVIDER_MODELS')
+  }
+  return value as unknown as WebProviderModelsDraft
+}
+
+/** Discover model ids from browser-safe metadata; raw credentials are structurally rejected. */
+export function createWebProviderModelsHandler(options: WebProviderModelsHandlerOptions) {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const controller = new AbortController()
+    const onAborted = (): void => { controller.abort() }
+    req.once('aborted', onAborted)
+    try {
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { error: 'VISION_WEB_METHOD_NOT_ALLOWED' }, { allow: 'POST' })
+        return
+      }
+      if (!sameOrigin(req)) httpError(403, 'VISION_WEB_ORIGIN_REJECTED')
+      const contentType = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase()
+      if (contentType !== 'application/json') httpError(415, 'VISION_WEB_CONTENT_TYPE_REJECTED')
+      const body = await readJson(req, REQUEST_OVERHEAD_BYTES)
+      const draft = providerModelsDraft(body)
+      const models = await options.models(draft, controller.signal)
+      writeJson(res, 200, { ok: true, models })
+    } catch (error) {
+      if (res.headersSent || res.destroyed) return
+      if (error instanceof WebDraftHttpError) {
+        writeJson(res, error.status, { error: error.code })
+        return
+      }
+      const code = providerValidationCode(error)
+      if (code !== undefined) {
+        const status = code === 'VISION_CREDENTIAL_MISSING' ? 424 : 502
+        const diagnostic = providerValidationDiagnostic(error, code)
+        writeJson(res, status, {
+          ok: false,
+          error: code,
+          ...(diagnostic === undefined ? {} : { diagnostic }),
+        })
+        return
+      }
+      writeJson(res, 500, { ok: false, error: 'VISION_WEB_INTERNAL' })
+    } finally {
+      req.off('aborted', onAborted)
+    }
+  }
+}
+
 function textReferencesBridgeAttachment(text: string, reference: string): boolean {
   const suffix = `](${reference})`
   for (const line of text.split('\n')) {
@@ -390,18 +549,10 @@ export function createWebAttachmentHandler(options: WebAttachmentHandlerOptions)
   }
 }
 
-function boundedIdentifier(value: unknown): string {
-  if (typeof value !== 'string' || !value || hasControlCharacters(value)
-    || takeCodePoints(value, MAX_MODEL_ID_CHARS).truncated) {
-    httpError(400, 'VISION_WEB_INVALID_MODEL')
-  }
-  return value
-}
-
 /**
- * Resolve native-vs-bridge before image admission. This mirrors the Host's
- * documented rc.6 capability rule without creating a rejected prompt, so the
- * official client's sticky promptError remains untouched.
+ * Resolve native-vs-bridge from the session's immutable Open Eyes latch.
+ * The main model is deliberately irrelevant: enabled sessions always bridge,
+ * while disabled sessions return to DSH before image admission.
  */
 export function createWebImageRouteHandler(options: WebImageRouteHandlerOptions) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -419,19 +570,10 @@ export function createWebImageRouteHandler(options: WebImageRouteHandlerOptions)
         httpError(400, 'VISION_WEB_INVALID_SESSION')
       }
       const sessionId = body.sessionId as string
-      if (!options.hasSession(sessionId)) httpError(404, 'VISION_WEB_SESSION_NOT_FOUND')
-      const provider = boundedIdentifier(body.provider)
-      const model = boundedIdentifier(body.model)
-      let info: { readonly inputModalities?: readonly string[] }
-      try {
-        info = await options.resolveModelInfo(provider, model)
-      } catch {
-        httpError(503, 'VISION_WEB_MODEL_CAPABILITY_UNAVAILABLE')
-      }
-      const route = info.inputModalities !== undefined && !info.inputModalities.includes('image')
-        ? 'bridge'
-        : 'native'
-      writeJson(res, 200, { route, ...readiness(options.config) })
+      const enabled = options.isEnabled(sessionId)
+      if (enabled === undefined) httpError(404, 'VISION_WEB_SESSION_NOT_FOUND')
+      const route = enabled ? 'bridge' : 'native'
+      writeJson(res, 200, { route, ...readiness(currentConfig(options.config)) })
     } catch (error) {
       if (res.headersSent || res.destroyed) return
       if (error instanceof WebDraftHttpError) {
@@ -454,21 +596,23 @@ export function createWebDraftHandler(options: WebDraftHandlerOptions) {
       if (!sameOrigin(req)) httpError(403, 'VISION_WEB_ORIGIN_REJECTED')
       const contentType = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase()
       if (contentType !== 'application/json') httpError(415, 'VISION_WEB_CONTENT_TYPE_REJECTED')
-      const body = await readJson(req, maxRequestBytes(options.config))
+      const config = currentConfig(options.config)
+      const body = await readJson(req, maxRequestBytes(config))
       if (!isRecord(body) || typeof body.sessionId !== 'string' || !body.sessionId
         || takeCodePoints(body.sessionId, MAX_SESSION_ID_CHARS).truncated) {
         httpError(400, 'VISION_WEB_INVALID_SESSION')
       }
       const sessionId = body.sessionId as string
       if (!options.hasSession(sessionId)) httpError(404, 'VISION_WEB_SESSION_NOT_FOUND')
-      const images = decodeBrowserImages(body.images, options.config)
-      const state = readiness(options.config)
+      if (options.isEnabled?.(sessionId) === false) httpError(409, 'VISION_DISABLED')
+      const images = decodeBrowserImages(body.images, config)
+      const state = readiness(config)
       if (!state.configured) {
         writeJson(res, 200, { ...state, references: [] })
         return
       }
 
-      const admitted = images.map(image => decodeBase64(image, options.config))
+      const admitted = images.map(image => decodeBase64(image, config))
       const total = admitted.reduce((sum, image) => sum + image.data.byteLength, 0)
       if (total > MAX_TOTAL_LOCAL_IMAGE_BYTES) httpError(413, 'VISION_IMAGE_TOO_LARGE')
       try {

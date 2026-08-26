@@ -1,18 +1,50 @@
 import { VisionBridgeError } from '../errors.js'
-import { postJson } from '../http.js'
-import type { AdapterRequest, AdapterResult, NormalizedUsage } from './types.js'
+import { getJson, postJson } from '../http.js'
+import type { AdapterModelsRequest, AdapterRequest, AdapterResult, NormalizedUsage } from './types.js'
 import { SAFETY_INSTRUCTION } from './types.js'
 
 const RESERVED = new Set(['model', 'messages', 'max_tokens', 'max_completion_tokens', 'stream'])
 
 function requestUrl(baseUrl: string, endpointPath: string): string {
   const url = new URL(baseUrl)
-  url.pathname = `${url.pathname.replace(/\/+$/u, '')}${endpointPath}`
+  const basePath = url.pathname.replace(/\/+$/u, '')
+  url.pathname = basePath.endsWith(endpointPath) ? basePath : `${basePath}${endpointPath}`
+  return url.toString()
+}
+
+function modelsUrl(baseUrl: string, endpointPath: string): string {
+  const url = new URL(baseUrl)
+  let basePath = url.pathname.replace(/\/+$/u, '')
+  if (basePath.endsWith(endpointPath)) basePath = basePath.slice(0, -endpointPath.length)
+  url.pathname = `${basePath}/models`
   return url.toString()
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+}
+
+/** OpenAI Chat Completions model discovery owns the OpenAI GET /models contract. */
+export async function listOpenAIChatCompletionsModels(request: AdapterModelsRequest): Promise<readonly string[]> {
+  const response = await getJson({
+    url: modelsUrl(request.provider.baseUrl, request.provider.endpointPath),
+    headers: { ...request.provider.headers, ...request.authHeaders },
+    secrets: request.secrets,
+    ...request.transport,
+  })
+  const payload = record(response.payload)
+  if (!payload || !Array.isArray(payload.data)) {
+    throw new VisionBridgeError('VISION_UPSTREAM_PROTOCOL', 'OpenAI Chat Completions Models returned invalid data')
+  }
+  const models: string[] = []
+  const seen = new Set<string>()
+  for (const value of payload.data.slice(0, 1_000)) {
+    const id = record(value)?.id
+    if (typeof id !== 'string' || !id || id.length > 1_024 || seen.has(id)) continue
+    seen.add(id)
+    models.push(id)
+  }
+  return models
 }
 
 function token(value: unknown): number | undefined {

@@ -128,6 +128,7 @@ describe('chat node slot registration', () => {
           }
         }),
         entries: vi.fn((name: string) => (name === 'conversation.chat.node' ? [...entries] : [])),
+        inject: vi.fn((_name: string, install: () => unknown) => install()),
       },
       registrations,
     }
@@ -144,6 +145,7 @@ describe('chat node slot registration', () => {
       sendSession: vi.fn(async () => undefined),
       draftImages: vi.fn(() => [attachment]),
       releaseDraftImages: vi.fn(),
+      resolveImage: vi.fn(async () => 'blob:native-image'),
     }
   }
 
@@ -155,15 +157,44 @@ describe('chat node slot registration', () => {
             result: { ok: true as const, value: { current: { provider: 'p', model: 'm' } } },
           })),
         },
+        settings: {
+          mutate: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
+        },
+        credentials: {
+          describe: vi.fn(async () => ({ result: { ok: true as const, value: { credentials: {} } } })),
+          set: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
+          unset: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
+        },
       },
     }
   }
 
   function context(services: Record<string, unknown>) {
     const disposers: (() => void)[] = []
+    const scope = {
+      getSnapshot: () => ({
+        status: 'ready' as const,
+        value: { profiles: {} },
+        base: { profiles: {} },
+        user: undefined,
+        revision: 1,
+        writable: true,
+        mode: 'host' as const,
+      }),
+      subscribe: () => () => undefined,
+      set: async () => undefined,
+      unset: async () => undefined,
+    }
+    const defaults = {
+      settingsScope: { bind: () => scope },
+      locale: {
+        register: () => () => undefined,
+        bind: () => (key: string) => key,
+      },
+    }
     return {
       value: {
-        get: (name: string) => services[name],
+        get: (name: string) => services[name] ?? defaults[name as keyof typeof defaults],
         effect: (execute: () => (() => void)) => {
           disposers.push(execute())
           return undefined
@@ -181,10 +212,11 @@ describe('chat node slot registration', () => {
     const slots = slotsService({ user: stock as (props: never) => unknown })
     const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
     apply(ctx.value)
-    expect(slots.registrations).toHaveLength(2)
-    expect(slots.registrations.map((r) => r.key).sort()).toEqual(['steering', 'user'])
-    expect(slots.registrations.every((r) => r.name === 'conversation.chat.node' && r.priority < 0)).toBe(true)
-    expect(slots.registrations.every((r) => r.locale === 'conversation')).toBe(true)
+    const chatRegistrations = slots.registrations.filter(record => record.name === 'conversation.chat.node')
+    expect(chatRegistrations).toHaveLength(2)
+    expect(chatRegistrations.map((r) => r.key).sort()).toEqual(['steering', 'user'])
+    expect(chatRegistrations.every((r) => r.priority < 0)).toBe(true)
+    expect(chatRegistrations.every((r) => r.locale === 'conversation')).toBe(true)
     const before = slots.value.entries('conversation.chat.node').length
     ctx.dispose()
     expect(slots.value.entries('conversation.chat.node')).toHaveLength(before - 2)
@@ -212,7 +244,7 @@ describe('chat node slot registration', () => {
     ctx.dispose()
   })
 
-  it('forwards the locale seat and replaces the native loader only for a bridged message', () => {
+  it('forwards the stock renderer props while projecting a bridged message', () => {
     const stock = vi.fn(() => null)
     const slots = slotsService({ user: stock as (props: never) => unknown })
     const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
@@ -229,8 +261,7 @@ describe('chat node slot registration', () => {
     })
     const forwarded = (result as { props: { t: unknown; loadImage: unknown; node: { kind: string } } }).props
     expect(forwarded.t).toBe(t)
-    expect(forwarded.loadImage).not.toBe(loadImage)
-    expect(typeof forwarded.loadImage).toBe('function')
+    expect(forwarded.loadImage).toBe(loadImage)
     expect(forwarded.node.kind).toBe('user')
     expect(stock).not.toHaveBeenCalled()
     ctx.dispose()

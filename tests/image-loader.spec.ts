@@ -53,4 +53,5 @@ describe('bridge history image loader', () => {
     expect(createObjectURL).not.toHaveBeenCalled()
     loader.dispose()
   })
+
 })
