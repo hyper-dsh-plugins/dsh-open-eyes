@@ -149,22 +149,19 @@ describe('chat node slot registration', () => {
     }
   }
 
-  function connection() {
+  function remote() {
     return {
-      api: {
-        sessions: {
-          models: vi.fn(async () => ({
-            result: { ok: true as const, value: { current: { provider: 'p', model: 'm' } } },
-          })),
-        },
-        settings: {
-          mutate: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
-        },
-        credentials: {
-          describe: vi.fn(async () => ({ result: { ok: true as const, value: { credentials: {} } } })),
-          set: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
-          unset: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
-        },
+      settings: {
+        describe: vi.fn(async () => ({
+          ok: true as const,
+          value: { writable: true, hasDocument: true, namespaces: [] },
+        })),
+        mutate: vi.fn(async () => ({ ok: true as const, value: {} })),
+      },
+      credentials: {
+        describe: vi.fn(async () => ({ ok: true as const, value: {} })),
+        set: vi.fn(async () => ({ ok: true as const, value: {} })),
+        unset: vi.fn(async () => ({ ok: true as const, value: {} })),
       },
     }
   }
@@ -210,13 +207,13 @@ describe('chat node slot registration', () => {
   it('registers user and steering cells below stock priority and disposes them', () => {
     const stock = vi.fn(() => 'stock')
     const slots = slotsService({ user: stock as (props: never) => unknown })
-    const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
+    const ctx = context({ conversation: conversation(), remote: remote(), slots: slots.value })
     apply(ctx.value)
     const chatRegistrations = slots.registrations.filter(record => record.name === 'conversation.chat.node')
     expect(chatRegistrations).toHaveLength(2)
     expect(chatRegistrations.map((r) => r.key).sort()).toEqual(['steering', 'user'])
     expect(chatRegistrations.every((r) => r.priority < 0)).toBe(true)
-    expect(chatRegistrations.every((r) => r.locale === 'conversation')).toBe(true)
+    expect(chatRegistrations.every((r) => r.locale === 'chat')).toBe(true)
     const before = slots.value.entries('conversation.chat.node').length
     ctx.dispose()
     expect(slots.value.entries('conversation.chat.node')).toHaveLength(before - 2)
@@ -226,7 +223,7 @@ describe('chat node slot registration', () => {
   it('delegates ordinary messages to the stock renderer with identical props', () => {
     const stock = vi.fn(() => null)
     const slots = slotsService({ user: stock as (props: never) => unknown })
-    const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
+    const ctx = context({ conversation: conversation(), remote: remote(), slots: slots.value })
     apply(ctx.value)
     const bridge = slots.value
       .entries('conversation.chat.node')
@@ -247,7 +244,7 @@ describe('chat node slot registration', () => {
   it('forwards the stock renderer props while projecting a bridged message', () => {
     const stock = vi.fn(() => null)
     const slots = slotsService({ user: stock as (props: never) => unknown })
-    const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
+    const ctx = context({ conversation: conversation(), remote: remote(), slots: slots.value })
     apply(ctx.value)
     const bridge = slots.value
       .entries('conversation.chat.node')
@@ -270,7 +267,7 @@ describe('chat node slot registration', () => {
   it('hands the stock renderer upgraded content for a bridged message', () => {
     const stock = vi.fn(() => null)
     const slots = slotsService({ user: stock as (props: never) => unknown })
-    const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
+    const ctx = context({ conversation: conversation(), remote: remote(), slots: slots.value })
     apply(ctx.value)
     const bridge = slots.value
       .entries('conversation.chat.node')
@@ -305,7 +302,7 @@ describe('chat node slot registration', () => {
     const inner = vi.fn(() => null)
     const stock = memo(inner)
     const slots = slotsService({ user: stock as unknown as (props: never) => unknown })
-    const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
+    const ctx = context({ conversation: conversation(), remote: remote(), slots: slots.value })
     apply(ctx.value)
     const bridge = slots.value
       .entries('conversation.chat.node')
@@ -321,7 +318,7 @@ describe('chat node slot registration', () => {
 
   it('renders nothing when no stock renderer is available for a bridged message', () => {
     const slots = slotsService({})
-    const ctx = context({ conversation: conversation(), connection: connection(), slots: slots.value })
+    const ctx = context({ conversation: conversation(), remote: remote(), slots: slots.value })
     apply(ctx.value)
     const bridge = slots.value
       .entries('conversation.chat.node')
@@ -337,7 +334,7 @@ describe('chat node slot registration', () => {
     const fake = conversation()
     const original = fake.sendSession
     const slots = slotsService({ user: vi.fn() })
-    const ctx = context({ conversation: fake, connection: connection(), slots: slots.value })
+    const ctx = context({ conversation: fake, remote: remote(), slots: slots.value })
     apply(ctx.value)
     expect(fake.sendSession).not.toBe(original)
     ctx.dispose()
@@ -345,7 +342,7 @@ describe('chat node slot registration', () => {
   })
 
   it('requires the slots service at install time', () => {
-    const ctx = context({ conversation: conversation(), connection: connection() })
+    const ctx = context({ conversation: conversation(), remote: remote() })
     expect(() => apply(ctx.value)).toThrow(/slots service/)
   })
 })

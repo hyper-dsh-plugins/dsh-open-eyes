@@ -5,13 +5,36 @@ export type { SubmitOutcome as BridgeSubmitOutcome } from '@deepseek-ai/dsh-clie
 
 export interface BridgeSession {
   readonly sessionId: string
+  getSnapshot(): { readonly subagent: unknown | null }
+  beginSubmission(input: {
+    readonly text: string
+    readonly images: readonly {
+      readonly previewUrl: string
+      readonly name?: string
+      readonly width?: number
+      readonly height?: number
+    }[]
+    readonly onRetire?: (retirement: BridgeSubmissionRetirement) => void
+  }): { readonly requestId: string; abandon(): void }
+  prompt(
+    content: readonly { readonly type: 'text'; readonly text: string }[],
+    mode: BridgeSubmitMode,
+    signal?: AbortSignal,
+    requestId?: string,
+  ): Promise<{ readonly ok: boolean }>
 }
+
+export type BridgeSubmissionRetirement =
+  | { readonly reason: 'observed'; readonly attachments: readonly unknown[] }
+  | { readonly reason: 'failed' }
 
 export interface BridgeDraftAttachment {
   readonly kind: 'image'
   readonly id: string
   readonly previewUrl: string
   readonly file: File
+  readonly width?: number
+  readonly height?: number
 }
 
 export type BridgeSubmitMode = 'queue' | 'steer'
@@ -64,6 +87,114 @@ async function serializeDraft(file: File): Promise<SerializedDraft> {
     mediaType: file.type,
     data: bytesToBase64(bytes),
   }
+}
+
+/** Give alpha.1's local echo one browser paint before image serialization/upload work. */
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame !== 'function') {
+      setTimeout(resolve, 0)
+      return
+    }
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      setTimeout(resolve, 0)
+      return
+    }
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(fallback)
+      setTimeout(resolve, 0)
+    }
+    const fallback = setTimeout(finish, 100)
+    requestAnimationFrame(finish)
+  })
+}
+
+function echoImages(attachments: readonly BridgeDraftAttachment[]) {
+  return attachments.map(attachment => ({
+    previewUrl: attachment.previewUrl,
+    ...(attachment.file.name === '' ? {} : { name: attachment.file.name }),
+    ...(attachment.width === undefined ? {} : { width: attachment.width }),
+    ...(attachment.height === undefined ? {} : { height: attachment.height }),
+  }))
+}
+
+/**
+ * alpha.1 has no public pre-admission middleware or separate echo/durable text
+ * fields. Register the truthful local echo first, then let the exact official
+ * sendSession chain perform its normal prompt call while substituting only the
+ * already-created submission handle at its synchronous beginSubmission seam.
+ */
+async function sendWithAlpha1Echo(
+  conversation: BridgeConversation,
+  original: BridgeConversation['sendSession'],
+  session: BridgeSession,
+  displayText: string,
+  prepareDurableText: () => Promise<string>,
+  attachments: readonly BridgeDraftAttachment[],
+  mode: BridgeSubmitMode,
+  signal?: AbortSignal,
+): Promise<SubmitOutcome> {
+  if (session.getSnapshot().subagent !== null) {
+    const durableText = await prepareDurableText()
+    const outcome = await original.call(conversation, session, durableText, [], mode, signal)
+    if (outcome.kind === 'success') conversation.releaseDraftImages(attachments)
+    return outcome
+  }
+
+  let delegatedRetirement: ((retirement: BridgeSubmissionRetirement) => void) | undefined
+  let finishRetirement: ((retirement: BridgeSubmissionRetirement) => void) | undefined
+  const retirement = new Promise<BridgeSubmissionRetirement>((resolve) => { finishRetirement = resolve })
+  const submission = session.beginSubmission({
+    text: displayText,
+    images: echoImages(attachments),
+    onRetire: (settlement) => {
+      delegatedRetirement?.(settlement)
+      if (settlement.reason === 'observed') conversation.releaseDraftImages(attachments)
+      finishRetirement?.(settlement)
+    },
+  })
+  let durableText: string
+  try {
+    await nextPaint()
+    durableText = await prepareDurableText()
+  } catch (error) {
+    submission.abandon()
+    throw error
+  }
+
+  const originalDescriptor = Object.getOwnPropertyDescriptor(session, 'beginSubmission')
+  const originalBegin = session.beginSubmission
+  let consumed = false
+  const substitute: BridgeSession['beginSubmission'] = (input) => {
+    if (consumed) return originalBegin.call(session, input)
+    consumed = true
+    delegatedRetirement = input.onRetire
+    return submission
+  }
+  session.beginSubmission = substitute
+  let pending: Promise<SubmitOutcome>
+  try {
+    pending = original.call(conversation, session, durableText, [], mode, signal)
+  } catch (error) {
+    submission.abandon()
+    throw error
+  } finally {
+    if (session.beginSubmission === substitute) {
+      if (originalDescriptor === undefined) Reflect.deleteProperty(session, 'beginSubmission')
+      else Object.defineProperty(session, 'beginSubmission', originalDescriptor)
+    }
+  }
+  if (!consumed) {
+    submission.abandon()
+    throw new Error('Vision Bridge could not enter the DSH 0.1.2-alpha.1 submission seam.')
+  }
+  const outcome = await pending
+  if (outcome.kind !== 'success') return outcome
+  const settlement = await retirement
+  return settlement.reason === 'observed' ? outcome : { kind: 'error' }
 }
 
 function validUploadResponse(value: unknown): value is WebDraftUploadResponse {
@@ -189,12 +320,11 @@ export function createVisionBridgeSendSession(
     if (attachments.length !== imageIds.length) {
       throw new Error('Vision Bridge could not resolve one or more pasted image drafts.')
     }
-    const images: SerializedDraft[] = []
-    for (const attachment of attachments) images.push(await serializeDraft(attachment.file))
-    const upload = await uploadDrafts(session.sessionId, images, fetcher, signal)
-    const prompt = buildBridgePrompt(text, upload)
-    const outcome = await original.call(conversation, session, prompt, [], mode, signal)
-    if (outcome.kind === 'success') conversation.releaseDraftImages(attachments)
-    return outcome
+    return sendWithAlpha1Echo(conversation, original, session, text, async () => {
+      const images: SerializedDraft[] = []
+      for (const attachment of attachments) images.push(await serializeDraft(attachment.file))
+      const upload = await uploadDrafts(session.sessionId, images, fetcher, signal)
+      return buildBridgePrompt(text, upload)
+    }, attachments, mode, signal)
   }
 }

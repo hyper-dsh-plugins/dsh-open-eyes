@@ -16,11 +16,11 @@ import {
 } from '../src/settings.js'
 
 function ok<T>(value: T) {
-  return { result: { ok: true as const, value } }
+  return { ok: true as const, value }
 }
 
 function rejected(message: string) {
-  return { result: { ok: false as const, error: { code: 'rejected', message } } }
+  return { ok: false as const, error: { code: 'rejected', message } }
 }
 
 interface ApiOverrides {
@@ -34,9 +34,11 @@ interface ApiOverrides {
 function api(overrides: ApiOverrides = {}) {
   const settingsMutate = vi.fn(overrides.settingsMutate ?? (async () => ok({})))
   const settingsDescribe = vi.fn(overrides.settingsDescribe ?? (async () => ok({
+    writable: true,
+    hasDocument: true,
     namespaces: [{ ns: 'dsh-open-eyes', value: { profiles: {} } }],
   })))
-  const credentialsDescribe = vi.fn(overrides.credentialsDescribe ?? (async () => ok({ credentials: {} })))
+  const credentialsDescribe = vi.fn(overrides.credentialsDescribe ?? (async () => ok({})))
   const credentialsSet = vi.fn(overrides.credentialsSet ?? (async () => ok({})))
   const credentialsUnset = vi.fn(overrides.credentialsUnset ?? (async () => ok({})))
   const client = {
@@ -80,15 +82,15 @@ describe('provider settings card writes', () => {
       focusAreas: ['details', 'text', 'details'],
       preference: '  Focus on serial numbers.  ',
     }, 8)).resolves.toEqual({ ok: true })
-    expect(settingsMutate).toHaveBeenCalledWith({
-      ns: 'dsh-open-eyes',
-      ops: [
+    expect(settingsMutate).toHaveBeenCalledWith(
+      'dsh-open-eyes',
+      [
         { op: 'set', path: ['visualAnalysis'], value: 'deep' },
         { op: 'set', path: ['focusAreas'], value: ['text', 'details'] },
         { op: 'set', path: ['preference'], value: 'Focus on serial numbers.' },
       ],
-      expectedRevision: 8,
-    })
+      8,
+    )
   })
 
   it('counts Chinese characters and contiguous English words as equal preference units', () => {
@@ -135,9 +137,9 @@ describe('provider settings card writes', () => {
       history: [{ effectiveAt: 0, enabled: true }],
       now: 100,
     })).resolves.toEqual({ ok: true })
-    expect(settingsMutate).toHaveBeenCalledWith({
-      ns: 'dsh-open-eyes',
-      ops: [
+    expect(settingsMutate).toHaveBeenCalledWith(
+      'dsh-open-eyes',
+      [
         { op: 'set', path: ['enabled'], value: false },
         {
           op: 'set',
@@ -148,8 +150,8 @@ describe('provider settings card writes', () => {
           ],
         },
       ],
-      expectedRevision: 9,
-    })
+      9,
+    )
   })
 
   it('stores a trimmed optional display name independently of the scheme id', async () => {
@@ -163,7 +165,7 @@ describe('provider settings card writes', () => {
       id: 'primary',
       profile: { displayName: 'Production Vision', model: 'vision-model' },
     })
-    expect(settingsMutate.mock.calls[0]?.[0].ops[0]).toMatchObject({
+    expect(settingsMutate.mock.calls[0]?.[1]?.[0]).toMatchObject({
       value: { displayName: 'Production Vision', model: 'vision-model' },
     })
   })
@@ -200,10 +202,10 @@ describe('provider settings card writes', () => {
       },
       stagedCredential: modelDiscoveryCredentialReferenceForProfile('primary', 'lookup-1'),
     })
-    expect(credentialsSet).toHaveBeenCalledWith({
-      ref: modelDiscoveryCredentialReferenceForProfile('primary', 'lookup-1'),
-      value: 'sk-browser-only',
-    })
+    expect(credentialsSet).toHaveBeenCalledWith(
+      modelDiscoveryCredentialReferenceForProfile('primary', 'lookup-1'),
+      'sk-browser-only',
+    )
 
     if (!prepared.ok) return
     await expect(requestModels(prepared.draft, fetcher)).resolves.toEqual({
@@ -299,9 +301,9 @@ describe('provider settings card writes', () => {
       },
     })
     expect(order).toEqual(['credential', 'settings'])
-    expect(client.settings.mutate).toHaveBeenCalledWith({
-      ns: 'dsh-open-eyes',
-      ops: [
+    expect(client.settings.mutate).toHaveBeenCalledWith(
+      'dsh-open-eyes',
+      [
         {
           op: 'set',
           path: ['profiles', 'primary'],
@@ -313,13 +315,10 @@ describe('provider settings card writes', () => {
           },
         },
       ],
-      expectedRevision: 7,
-    })
+      7,
+    )
     expect(JSON.stringify(settingsMutate.mock.calls)).not.toContain('sk-browser-only')
-    expect(credentialsSet).toHaveBeenCalledWith({
-      ref: credential,
-      value: '  sk-browser-only\n',
-    })
+    expect(credentialsSet).toHaveBeenCalledWith(credential, '  sk-browser-only\n')
   })
 
   it('initializes the first user-created scheme as default even when the checkbox is left clear', async () => {
@@ -332,7 +331,7 @@ describe('provider settings card writes', () => {
     })
 
     expect(result.ok).toBe(true)
-    expect(settingsMutate.mock.calls[0]?.[0].ops).toContainEqual({
+    expect(settingsMutate.mock.calls[0]?.[1]).toContainEqual({
       op: 'set',
       path: ['defaultProvider'],
       value: 'primary',
@@ -348,7 +347,7 @@ describe('provider settings card writes', () => {
       credentialNonce: 'second-scheme',
     })
 
-    expect(settingsMutate.mock.calls[0]?.[0].ops).toContainEqual({
+    expect(settingsMutate.mock.calls[0]?.[1]).toContainEqual({
       op: 'set',
       path: ['defaultProvider'],
       value: 'alpha',
@@ -363,11 +362,9 @@ describe('provider settings card writes', () => {
       protocol: 'anthropic-messages',
     }, { revision: 2, credentialNonce: 'anthropic-save' })
 
-    expect(settingsMutate.mock.calls[0]?.[0]).toMatchObject({
-      ops: [{
+    expect(settingsMutate.mock.calls[0]?.[1]).toMatchObject([{
         value: expect.objectContaining({ maxOutputTokens: 4_096 }),
-      }],
-    })
+      }])
   })
 
   it('does not write a credential when editing with a blank key', async () => {
@@ -379,9 +376,9 @@ describe('provider settings card writes', () => {
     }, { revision: 3 })
 
     expect(credentialsSet).not.toHaveBeenCalled()
-    expect(settingsMutate.mock.calls[0]?.[0]).toMatchObject({
-      ops: [{ value: expect.objectContaining({ credential: 'EXISTING_VISION_KEY' }) }],
-    })
+    expect(settingsMutate.mock.calls[0]?.[1]).toMatchObject([
+      { value: expect.objectContaining({ credential: 'EXISTING_VISION_KEY' }) },
+    ])
   })
 
   it('preserves safe advanced fields that the basic form does not expose', async () => {
@@ -398,16 +395,14 @@ describe('provider settings card writes', () => {
       },
     })
 
-    expect(settingsMutate.mock.calls[0]?.[0]).toMatchObject({
-      ops: [{
+    expect(settingsMutate.mock.calls[0]?.[1]).toMatchObject([{
         value: expect.objectContaining({
           endpointPath: '/responses',
           maxOutputTokens: 8_192,
           baseUrl: 'https://vision.example.test/v1',
           model: 'vision-model',
         }),
-      }],
-    })
+      }])
   })
 
   it('rolls back the fresh credential when metadata is explicitly rejected', async () => {
@@ -428,7 +423,7 @@ describe('provider settings card writes', () => {
       error: 'settings-write-failed',
     })
     expect(credentialsSet).toHaveBeenCalledOnce()
-    expect(credentialsUnset).toHaveBeenCalledWith({ ref: credential })
+    expect(credentialsUnset).toHaveBeenCalledWith(credential)
   })
 
   it('reconciles a thrown metadata call before rolling back its fresh credential', async () => {
@@ -448,7 +443,7 @@ describe('provider settings card writes', () => {
       credentialCommitted: false,
       error: 'settings-write-failed',
     })
-    expect(credentialsUnset).toHaveBeenCalledWith({ ref: credential })
+    expect(credentialsUnset).toHaveBeenCalledWith(credential)
   })
 
   it('keeps a fresh credential when reconciliation proves the thrown metadata call committed', async () => {
@@ -456,6 +451,8 @@ describe('provider settings card writes', () => {
     const { client, credentialsUnset } = api({
       settingsMutate: async () => { throw new Error('response lost') },
       settingsDescribe: async () => ok({
+        writable: true,
+        hasDocument: true,
         namespaces: [{
           ns: 'dsh-open-eyes',
           value: { profiles: { primary: { credential } } },
@@ -541,8 +538,8 @@ describe('provider settings card writes', () => {
       },
     })
 
-    expect(credentialsSet).toHaveBeenCalledWith({ ref: fresh, value: 'new-key' })
-    expect(settingsMutate.mock.calls[0]?.[0].ops[0]).toMatchObject({
+    expect(credentialsSet).toHaveBeenCalledWith(fresh, 'new-key')
+    expect(settingsMutate.mock.calls[0]?.[1]?.[0]).toMatchObject({
       value: expect.objectContaining({
         baseUrl: 'https://new-endpoint.example.test/v1',
         credential: fresh,
@@ -591,7 +588,7 @@ describe('provider settings card writes', () => {
     }, { revision: 1, credentialNonce: 'complete-endpoint' })
 
     expect(result.ok).toBe(true)
-    expect(settingsMutate.mock.calls[0]?.[0].ops[0]).toEqual({
+    expect(settingsMutate.mock.calls[0]?.[1]?.[0]).toEqual({
       op: 'set',
       path: ['profiles', 'primary'],
       value: {
@@ -615,20 +612,22 @@ describe('provider settings card writes', () => {
       disabledProfiles: [],
     })
 
-    expect(settingsMutate).toHaveBeenNthCalledWith(1, {
-      ns: 'dsh-open-eyes',
-      ops: [{ op: 'set', path: ['defaultProvider'], value: 'backup' }],
-      expectedRevision: 5,
-    })
-    expect(settingsMutate).toHaveBeenNthCalledWith(2, {
-      ns: 'dsh-open-eyes',
-      ops: [
+    expect(settingsMutate).toHaveBeenNthCalledWith(
+      1,
+      'dsh-open-eyes',
+      [{ op: 'set', path: ['defaultProvider'], value: 'backup' }],
+      5,
+    )
+    expect(settingsMutate).toHaveBeenNthCalledWith(
+      2,
+      'dsh-open-eyes',
+      [
         { op: 'unset', path: ['profiles', 'backup'] },
         { op: 'set', path: ['disabledProfiles'], value: ['backup'] },
         { op: 'set', path: ['defaultProvider'], value: 'primary' },
       ],
-      expectedRevision: 6,
-    })
+      6,
+    )
   })
 
   it('deletes every profile through the same source-neutral operation', async () => {
@@ -642,14 +641,14 @@ describe('provider settings card writes', () => {
     })
 
     expect(result).toEqual({ ok: true })
-    expect(settingsMutate).toHaveBeenCalledWith({
-      ns: 'dsh-open-eyes',
-      ops: [
+    expect(settingsMutate).toHaveBeenCalledWith(
+      'dsh-open-eyes',
+      [
         { op: 'unset', path: ['profiles', 'primary'] },
         { op: 'set', path: ['disabledProfiles'], value: ['primary'] },
         { op: 'unset', path: ['defaultProvider'] },
       ],
-      expectedRevision: 1,
-    })
+      1,
+    )
   })
 })

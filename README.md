@@ -16,11 +16,13 @@ Open Eyes supports OpenAI Responses, OpenAI Chat Completions, and Anthropic Mess
 
 ## Install
 
-Requirements: DeepSeek Harness `0.1.1-rc.2` and Node.js `>=22.19.0`.
+Requires Node.js `>=22.19.0`. Open Eyes requires exact one-to-one version matching with DSH; releases are neither forward nor backward compatible.
 
-```sh
-dsh plugin --profile web add dsh-open-eyes@0.1.1-rc.2
-```
+| DeepSeek Harness version | Install command |
+| --- | --- |
+| `0.1.0-rc.6` | `dsh plugin --profile web add dsh-open-eyes@0.1.0` |
+| `0.1.1-rc.2` | `dsh plugin --profile web add dsh-open-eyes@0.1.1-rc.2` |
+| `0.1.2-alpha.1` | `dsh plugin --profile web add dsh-open-eyes@0.1.2-alpha.1` |
 
 Restart DSH Web after installation, then reload the page. DSH profiles are independent, so install the plugin separately in every profile where you want to use it.
 
@@ -147,8 +149,7 @@ For a headless profile, replace `web` in the installation and inspection command
 
 ## Reliability and compatibility
 
-- Designed and tested for DeepSeek Harness `0.1.1-rc.2`.
-- Compatible with `dsh-open-file@0.1.1-rc.2` in either installation order.
+- Each Open Eyes release is designed and tested only for the exact DeepSeek Harness version listed in the installation table; compatibility does not extend to earlier or later DSH versions.
 - Text-only submissions and disabled conversations stay on the original DSH submission path.
 - Submission outcomes, cancellation, errors, and draft images are preserved through the Web wrapper.
 - Model discovery, validation, and visual inference recover from bounded transient network, timeout, response-body, rate-limit, and gateway failures. The default is a five-minute deadline per attempt with up to two retries.
@@ -190,7 +191,7 @@ npm pack --dry-run
 pnpm run test:e2e
 ```
 
-The test suite does not require a paid vision API. The packed-profile test installs, starts, and removes the real tarball in a temporary DSH profile and also exercises coexistence with `dsh-open-file` in both installation orders.
+The test suite does not require a paid vision API. The packed-profile test installs, starts, and removes the real tarball in a temporary DSH profile.
 
 ## License
 

@@ -1,6 +1,6 @@
 ---
 name: vision-bridge
-description: Handle pasted WebUI images and visual questions with the native multimodal path or vision_analyze delegation; use for readiness guidance, precise OCR, UI, chart, screenshot, code-image, and visual-comparison tasks.
+description: Use when a request includes Open Eyes `Attached image` links, pasted WebUI images, screenshots, local image paths, HTTP(S) image URLs, or any request to inspect, read, identify, compare, or reason from visual evidence, including Open Eyes readiness, OCR, UI, chart, and code-image tasks.
 ---
 
 # Vision Bridge

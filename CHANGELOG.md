@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2-alpha.1] - 2026-08-28
+
+### Changed
+
+- Upgraded the package and audited DeepSeek Harness compatibility line to `0.1.2-alpha.1`.
+- Replaced the removed browser `connection.api` transport with generated `remote.settings` and `remote.credentials` calls and their direct result envelopes.
+- Moved bridge history-image loading from the removed `conversation.resolveImage()` seam to the public `conversation.message.images` renderer slot, while delegating ordinary DSH images to the shipped gallery and loader.
+- Updated keyed chat-node rendering to the alpha.1 `chat` locale namespace.
+- Expanded the bundled Skill discovery description to cover Open Eyes attachment links, pasted images, screenshots, local image paths, image URLs, and visual-evidence tasks.
+- Clarified that an already open blank conversation keeps the Open Eyes enablement state captured when that conversation was created.
+
+### Fixed
+
+- Preserved alpha.1's immediate local submission echo without exposing durable internal attachment Markdown: the echo contains the user's original text and draft previews, while the Host admission receives only the original text plus session-bound attachment links.
+- Retained draft images on preparation, prompt, or retirement failure and released them only after the durable submission was observed.
+- Updated the official attachment-validation contract fixture for alpha.1's normalized-image pixel budget.
+- Verified the packed, authenticated Web boot on Node.js `26.7.0`.
+
+### Security
+
+- Kept settings writes on DSH Remote and credential values on `remote.credentials`; no secret is returned, rendered, or added to durable conversation state.
+- The submission bridge remains an explicitly version-pinned alpha.1 seam because DSH does not yet expose a public atomic pre-submit transform. Future DSH upgrades must re-audit it and pass the packed Web boot before compatibility is claimed.
+
 ## [0.1.1-rc.2] - 2026-08-26
 
 ### Changed
@@ -68,6 +91,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Provider credentials, configured header values, image encodings, URLs, upstream errors, and provider-controlled metadata are bounded and redacted at public error/render boundaries.
 - Publication fails unless the built canonical package name and manifest identity agree.
 
-[Unreleased]: https://github.com/Hyp6666/dsh-open-eyes/compare/v0.1.1-rc.2...HEAD
+[Unreleased]: https://github.com/Hyp6666/dsh-open-eyes/compare/v0.1.2-alpha.1...HEAD
+[0.1.2-alpha.1]: https://github.com/Hyp6666/dsh-open-eyes/compare/v0.1.1-rc.2...v0.1.2-alpha.1
 [0.1.1-rc.2]: https://github.com/Hyp6666/dsh-open-eyes/compare/v0.1.0...v0.1.1-rc.2
 [0.1.0]: https://github.com/Hyp6666/dsh-open-eyes/releases/tag/v0.1.0

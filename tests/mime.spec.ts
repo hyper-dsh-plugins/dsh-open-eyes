@@ -6,6 +6,7 @@ import {
   DEFAULT_MAX_MESSAGE_IMAGE_BYTES,
   DEFAULT_NORMALIZED_IMAGE_MAX_BYTES,
   DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION,
+  DEFAULT_NORMALIZED_IMAGE_MAX_PIXELS,
   validateImageFile,
 } from '@deepseek-ai/dsh-attachment-local'
 import { describe, expect, it } from 'vitest'
@@ -25,6 +26,7 @@ const limits = {
 const normalization = {
   maxDimension: DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION,
   maxBytes: DEFAULT_NORMALIZED_IMAGE_MAX_BYTES,
+  maxPixels: DEFAULT_NORMALIZED_IMAGE_MAX_PIXELS,
 }
 
 describe('image MIME detection', () => {

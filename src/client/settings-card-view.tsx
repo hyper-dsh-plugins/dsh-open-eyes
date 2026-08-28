@@ -1,5 +1,5 @@
 import * as React from 'react'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   Button,
   IconChevronDownOutline14,
@@ -51,8 +51,8 @@ export const settingsCardLocales = {
     unavailable: '配置连接暂时不可用；已保留最后一次有效内容并切换为只读。',
     enabled: '启用',
     enabledHelpLabel: '查看启用范围说明',
-    enabledHelp: '开关变更仅对新会话生效；已有会话继续保持创建时的状态。',
-    enabledSaved: '启用设置已保存，将从新会话开始生效。',
+    enabledHelp: '开关变更仅对新会话生效；已经打开的空白会话也属于已有会话，并继续保持创建时的状态。',
+    enabledSaved: '启用设置已保存；请创建新会话以使用该状态，已经打开的空白会话不会改变。',
     preference: '偏好',
     preferenceHelpLabel: '查看图片分析偏好说明',
     preferenceHelp: '这些选项只会追加到视觉工具发给视觉模型的单次提示词，不会修改系统提示词、主对话上下文或 Harness 循环；全部保持默认时不会注入任何额外内容。',
@@ -141,8 +141,8 @@ export const settingsCardLocales = {
     unavailable: 'Configuration is temporarily unavailable. The last valid content is retained read-only.',
     enabled: 'Enable',
     enabledHelpLabel: 'Show enablement scope',
-    enabledHelp: 'Switch changes apply only to new conversations. Existing conversations keep their creation-time state.',
-    enabledSaved: 'Enablement saved. It will apply to new conversations.',
+    enabledHelp: 'Switch changes apply only to new conversations. An already open blank conversation counts as existing and keeps its creation-time state.',
+    enabledSaved: 'Enablement saved. Create a new conversation to use this state; an already open blank conversation does not change.',
     preference: 'Preference',
     preferenceHelpLabel: 'Show image-analysis preference help',
     preferenceHelp: 'These options are appended only to the one-time prompt sent by the vision tool. They do not change the system prompt, main conversation context, or Harness loop; leaving everything at Default adds nothing.',
@@ -539,7 +539,7 @@ export function ProviderSettingsCard(props: ProviderSettingsCardProps): React.Re
   const discardStagedCredential = async (credential = stagedCredential): Promise<void> => {
     if (credential === null) return
     try {
-      await api.credentials.unset({ ref: credential })
+      await api.credentials.unset(credential)
     } catch {
       // A failed cleanup remains unreferenced and never crosses rendered output.
     }

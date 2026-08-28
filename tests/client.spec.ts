@@ -22,32 +22,62 @@ afterEach(() => {
 })
 
 const compositionCases = [
-  ['dsh-open-file first', 'file-first', successOutcome, true],
-  ['dsh-open-eyes first', 'eyes-first', successOutcome, true],
-  ['dsh-open-file first with an error outcome', 'file-first', { kind: 'error', text: 'rejected' } as const, false],
-  ['dsh-open-eyes first with an error outcome', 'eyes-first', { kind: 'error', text: 'rejected' } as const, false],
+  ['outer wrapper first', 'outer-first', successOutcome, true],
+  ['Open Eyes first', 'eyes-first', successOutcome, true],
+  ['outer wrapper first with an error outcome', 'outer-first', { kind: 'error', text: 'rejected' } as const, false],
+  ['Open Eyes first with an error outcome', 'eyes-first', { kind: 'error', text: 'rejected' } as const, false],
 ] as const
 
-function conversation() {
+function conversation(result: BridgeSubmitOutcome | Error = successOutcome) {
   const attachment = {
     kind: 'image' as const,
     id: 'draft-1',
     previewUrl: 'blob:test',
     file: new File([png], 'clipboard.png', { type: 'image/png' }),
   }
+  const sendSession = vi.fn<BridgeConversation['sendSession']>(async (activeSession, text, imageIds, mode, signal) => {
+    if (activeSession.getSnapshot().subagent !== null) {
+      if (result instanceof Error) throw result
+      return result
+    }
+    const images = imageIds.map(() => ({ previewUrl: 'blob:test', name: 'clipboard.png' }))
+    const submission = activeSession.beginSubmission({ text, images })
+    if (result instanceof Error) {
+      submission.abandon()
+      throw result
+    }
+    if (result.kind !== 'success') {
+      submission.abandon()
+      return result
+    }
+    await activeSession.prompt([{ type: 'text', text }], mode, signal, submission.requestId)
+    return result
+  })
   const value = {
-    sendSession: vi.fn<BridgeConversation['sendSession']>(async () => successOutcome),
+    sendSession,
     draftImages: vi.fn(() => [attachment]),
     releaseDraftImages: vi.fn(),
-    resolveImage: vi.fn<(sessionId: string, attachment: unknown) => Promise<string>>(async () => 'blob:native-image'),
-  } satisfies BridgeConversation & {
-    resolveImage(sessionId: string, attachment: unknown): Promise<string>
-  }
+  } satisfies BridgeConversation
   return { value, attachment }
 }
 
 function session(): BridgeSession {
-  return { sessionId: 'session-1' }
+  let retire: ((retirement: { reason: 'observed'; attachments: readonly unknown[] } | { reason: 'failed' }) => void) | undefined
+  return {
+    sessionId: 'session-1',
+    getSnapshot: vi.fn(() => ({ subagent: null })),
+    beginSubmission: vi.fn((input) => {
+      retire = input.onRetire
+      return {
+        requestId: 'request-1',
+        abandon: vi.fn(() => { retire?.({ reason: 'failed' }) }),
+      }
+    }),
+    prompt: vi.fn(async () => {
+      retire?.({ reason: 'observed', attachments: [] })
+      return { ok: true }
+    }),
+  }
 }
 
 function response(payload: WebDraftUploadResponse | WebImageRoutingResponse, status = 200): Response {
@@ -71,34 +101,32 @@ const nativeRoute: WebImageRoutingResponse = {
   providerIds: ['primary'],
 }
 
-function connection() {
+function remote() {
   return {
-    api: {
-      sessions: {
-        models: vi.fn(async () => ({
-          result: {
-            ok: true as const,
-            value: { current: { provider: 'main-provider', model: 'text-model' } },
-          },
-        })),
-      },
-      settings: {
-        describe: vi.fn(async () => ({ result: { ok: true as const, value: { namespaces: [] } } })),
-        mutate: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
-      },
-      credentials: {
-        describe: vi.fn(async () => ({ result: { ok: true as const, value: { credentials: {} } } })),
-        set: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
-        unset: vi.fn(async () => ({ result: { ok: true as const, value: {} } })),
-      },
+    settings: {
+      describe: vi.fn(async () => ({ ok: true as const, value: { writable: true, hasDocument: true, namespaces: [] } })),
+      mutate: vi.fn(async () => ({ ok: true as const, value: {} })),
+    },
+    credentials: {
+      describe: vi.fn(async () => ({ ok: true as const, value: {} })),
+      set: vi.fn(async () => ({ ok: true as const, value: {} })),
+      unset: vi.fn(async () => ({ ok: true as const, value: {} })),
     },
   }
 }
 
 function slots() {
+  const registered: Array<{ options: { name: string; key?: string }; component: (props: never) => unknown }> = []
   const service = {
-    register: vi.fn(() => () => undefined),
-    entries: vi.fn(() => []),
+    register: vi.fn((options: { name: string; key?: string }, component: (props: never) => unknown) => {
+      const entry = { options, component }
+      registered.push(entry)
+      return () => {
+        const index = registered.indexOf(entry)
+        if (index >= 0) registered.splice(index, 1)
+      }
+    }),
+    entries: vi.fn((name: string) => registered.filter(entry => entry.options.name === name)),
     inject: vi.fn((_name: string, install: () => unknown) => install()),
   }
   return service
@@ -129,21 +157,21 @@ function locale() {
   }
 }
 
-const OPEN_FILE_ADAPTER = Symbol.for('dsh-open-file.rc6.submit-adapter')
+const SUBMISSION_WRAPPER = Symbol.for('dsh-open-eyes.test.submit-wrapper')
 
-/** Mirrors dsh-open-file@0.1.1-rc.2's public adapter and disposer shape. */
-function installOpenFileStyleAdapter(conversation: BridgeConversation): () => void {
+/** Models an independent contract-preserving wrapper and disposer. */
+function installSubmissionWrapper(conversation: BridgeConversation): () => void {
   const canonical = conversation as BridgeConversation & Record<PropertyKey, unknown>
   const original = conversation.sendSession
   const wrapped: BridgeConversation['sendSession'] = async (activeSession, text, imageIds, mode, signal) => {
     const withFile = `${text}\n\n[Attached file: notes.txt](dsh-file://session-1/file-1)`
     return original.call(conversation, activeSession, withFile, imageIds, mode, signal)
   }
-  canonical[OPEN_FILE_ADAPTER] = Object.freeze({ wrapped })
+  canonical[SUBMISSION_WRAPPER] = Object.freeze({ wrapped })
   conversation.sendSession = wrapped
   return () => {
     if (conversation.sendSession === wrapped) conversation.sendSession = original
-    delete canonical[OPEN_FILE_ADAPTER]
+    delete canonical[SUBMISSION_WRAPPER]
   }
 }
 
@@ -154,8 +182,8 @@ function installEyesClient(conversationService: BridgeConversation): () => void 
   ClientPlugin.apply({
     get: name => name === 'conversation'
       ? conversationService
-      : name === 'connection'
-        ? connection()
+      : name === 'remote'
+        ? remote()
         : name === 'slots'
           ? slots()
           : name === 'settingsScope'
@@ -184,8 +212,8 @@ describe('browser conversation bridge', () => {
     ClientPlugin.apply({
       get: name => name === 'conversation'
         ? fake.value
-        : name === 'connection'
-          ? connection()
+        : name === 'remote'
+          ? remote()
           : name === 'slots'
             ? slotService
             : name === 'settingsScope'
@@ -198,12 +226,18 @@ describe('browser conversation bridge', () => {
         return undefined
       },
     })
-    expect(ClientPlugin.inject).toEqual(['conversation', 'connection', 'slots', 'settingsScope', 'locale'])
+    expect(ClientPlugin.inject).toEqual([
+      'conversation', 'remote', 'remote.settings', 'remote.credentials', 'slots', 'settingsScope', 'locale',
+    ])
     expect(settings.bind).toHaveBeenCalledWith({ namespace: 'dsh-open-eyes' })
     expect(localeService.register).toHaveBeenCalledWith('dsh-open-eyes.settings', expect.objectContaining({ zh: expect.any(Object), en: expect.any(Object) }))
     expect(slotService.inject).toHaveBeenCalledWith('settings.plugin.item', expect.any(Function))
     expect(slotService.register).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'settings.plugin.item', key: 'dsh-open-eyes', locale: 'dsh-open-eyes.settings' }),
+      expect.any(Function),
+    )
+    expect(slotService.register).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'conversation.chat.node', key: 'user', locale: 'chat' }),
       expect.any(Function),
     )
     expect(fake.value.sendSession).not.toBe(original)
@@ -232,8 +266,8 @@ describe('browser conversation bridge', () => {
     ClientPlugin.apply({
       get: name => name === 'conversation'
         ? traced
-        : name === 'connection'
-          ? connection()
+        : name === 'remote'
+          ? remote()
           : name === 'slots'
             ? slots()
             : name === 'settingsScope'
@@ -264,7 +298,6 @@ describe('browser conversation bridge', () => {
       async sendSession() { return successOutcome }
       draftImages() { return [attachment] }
       releaseDraftImages(): void {}
-      async resolveImage() { return 'blob:native-image' }
     }
     const root = new ConversationService()
     const owner = Object.getPrototypeOf(root) as ConversationService
@@ -283,8 +316,8 @@ describe('browser conversation bridge', () => {
     ClientPlugin.apply({
       get: name => name === 'conversation'
         ? traced
-        : name === 'connection'
-          ? connection()
+        : name === 'remote'
+          ? remote()
           : name === 'slots'
             ? slots()
             : name === 'settingsScope'
@@ -305,16 +338,35 @@ describe('browser conversation bridge', () => {
     expect(Object.hasOwn(root, 'sendSession')).toBe(false)
   })
 
-  it('resolves only bridge history images through the plugin and restores the native resolver on unload', async () => {
+  it('routes only bridge history images through the message-image slot and delegates native images', async () => {
     const fake = conversation()
-    const original = fake.value.resolveImage
     const fetcher = vi.fn<typeof fetch>(async () => new Response(Uint8Array.from([1, 2, 3, 4]), {
       status: 200,
       headers: { 'content-type': 'image/png', 'content-length': '4' },
     }))
     vi.stubGlobal('fetch', fetcher)
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:bridge-history')
-    const dispose = installEyesClient(fake.value)
+    const slotService = slots()
+    const stock = vi.fn(() => null)
+    slotService.register({ name: 'conversation.message.images' }, stock as (props: never) => unknown)
+    const effects: Array<() => void> = []
+    ClientPlugin.apply({
+      get: name => name === 'conversation'
+        ? fake.value
+        : name === 'remote'
+          ? remote()
+          : name === 'slots'
+            ? slotService
+            : name === 'settingsScope'
+              ? settingsScope()
+              : name === 'locale'
+                ? locale()
+                : undefined,
+      effect: execute => {
+        effects.push(execute())
+        return undefined
+      },
+    })
     const bridgeAttachment = {
       attachmentId: 'bridge-1',
       mediaType: 'image/png',
@@ -322,50 +374,61 @@ describe('browser conversation bridge', () => {
       [BRIDGE_REFERENCE_FIELD]: 'vision-bridge://attachment/v1/session-1/bridge-1?media=image%2Fpng&bytes=4&width=1&height=1',
     }
 
-    await expect(fake.value.resolveImage('session-1', bridgeAttachment)).resolves.toBe('blob:bridge-history')
+    const imageRegistration = slotService.register.mock.calls.find(
+      call => call[0]?.name === 'conversation.message.images' && call[1] !== stock,
+    )
+    const renderer = imageRegistration?.[1] as ((props: Record<string, unknown>) => {
+      props: { loadImage: (attachment: unknown) => Promise<string> }
+    }) | undefined
+    expect(renderer).toBeTypeOf('function')
+    if (renderer === undefined) return
+    const nativeLoad = vi.fn(async () => 'blob:native-image')
+    const element = renderer({ images: [{ attachment: bridgeAttachment }], loadImage: nativeLoad, align: 'end' })
+
+    await expect(element.props.loadImage(bridgeAttachment)).resolves.toBe('blob:bridge-history')
     expect(fetcher).toHaveBeenCalledWith(WEB_ATTACHMENT_ENDPOINT, expect.objectContaining({ method: 'POST' }))
-    expect(original).not.toHaveBeenCalled()
+    expect(nativeLoad).not.toHaveBeenCalled()
 
     const nativeAttachment = { attachmentId: 'native-1', mediaType: 'image/png' }
-    await expect(fake.value.resolveImage('session-1', nativeAttachment)).resolves.toBe('blob:native-image')
-    expect(original).toHaveBeenCalledWith('session-1', nativeAttachment)
+    await expect(element.props.loadImage(nativeAttachment)).resolves.toBe('blob:native-image')
+    expect(nativeLoad).toHaveBeenCalledWith(nativeAttachment)
 
-    dispose()
-    expect(fake.value.resolveImage).toBe(original)
+    for (const dispose of effects.reverse()) dispose()
   })
 
   it.each([
-    ['dsh-open-file first', 'file-first'],
-    ['dsh-open-eyes first', 'eyes-first'],
-  ] as const)('installs and unloads with the published dsh-open-file lifecycle: %s', async (_label, order) => {
+    ['outer wrapper first', 'outer-first'],
+    ['Open Eyes first', 'eyes-first'],
+  ] as const)('installs and unloads with another contract-preserving wrapper: %s', async (_label, order) => {
     const fake = conversation()
     const original = fake.value.sendSession
-    let disposeFile: () => void
+    let disposeWrapper: () => void
     let disposeEyes: () => void
-    if (order === 'file-first') {
-      disposeFile = installOpenFileStyleAdapter(fake.value)
+    if (order === 'outer-first') {
+      disposeWrapper = installSubmissionWrapper(fake.value)
       disposeEyes = installEyesClient(fake.value)
     } else {
       disposeEyes = installEyesClient(fake.value)
-      disposeFile = installOpenFileStyleAdapter(fake.value)
+      disposeWrapper = installSubmissionWrapper(fake.value)
     }
     const signal = new AbortController().signal
+    const activeSession = session()
 
-    const outcome = await fake.value.sendSession(session(), 'Read both.', [], 'queue', signal)
+    const outcome = await fake.value.sendSession(activeSession, 'Read both.', [], 'queue', signal)
 
     expect(outcome).toBe(successOutcome)
     expect(original).toHaveBeenCalledWith(
-      session(),
+      activeSession,
       expect.stringContaining('[Attached file: notes.txt]'),
       [],
       'queue',
       signal,
     )
-    if (order === 'file-first') {
+    if (order === 'outer-first') {
       disposeEyes()
-      disposeFile()
+      disposeWrapper()
     } else {
-      disposeFile()
+      disposeWrapper()
       disposeEyes()
     }
     expect(fake.value.sendSession).toBe(original)
@@ -375,22 +438,23 @@ describe('browser conversation bridge', () => {
     const fake = conversation()
     const original = fake.value.sendSession
     const disposeEyes = installEyesClient(fake.value)
-    const disposeFile = installOpenFileStyleAdapter(fake.value)
+    const disposeWrapper = installSubmissionWrapper(fake.value)
     const signal = new AbortController().signal
     disposeEyes()
+    const activeSession = session()
 
-    const outcome = await fake.value.sendSession(session(), 'Read the file.', ['draft-1'], 'steer', signal)
+    const outcome = await fake.value.sendSession(activeSession, 'Read the file.', ['draft-1'], 'steer', signal)
 
     expect(outcome).toBe(successOutcome)
     expect(original).toHaveBeenCalledWith(
-      session(),
+      activeSession,
       expect.stringContaining('[Attached file: notes.txt]'),
       ['draft-1'],
       'steer',
       signal,
     )
     expect(fake.value.releaseDraftImages).not.toHaveBeenCalled()
-    disposeFile()
+    disposeWrapper()
   })
 
   it('passes text-only submissions through without reading model capability', async () => {
@@ -417,7 +481,6 @@ describe('browser conversation bridge', () => {
         providerIds: ['primary'],
         references: [reference],
       }, 201))
-    fake.value.sendSession.mockResolvedValueOnce(successOutcome as never)
     const wrapped = createVisionBridgeSendSession(fake.value, fetcher)
     const activeSession = session()
     const signal = new AbortController().signal
@@ -450,6 +513,58 @@ describe('browser conversation bridge', () => {
     expect(forwarded).not.toContain('call vision_analyze')
     expect(forwarded).not.toContain('default provider')
     expect(forwarded).not.toContain('third-party vision provider')
+    expect(fake.value.releaseDraftImages).toHaveBeenCalledWith([fake.attachment])
+  })
+
+  it('echoes the original text and draft previews while sending only durable bridge links', async () => {
+    const fake = conversation()
+    const reference = 'vision-bridge://attachment/v1/session-1/ref?media=image%2Fpng&bytes=9&width=1&height=1'
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(response(bridgeRoute))
+      .mockResolvedValueOnce(response({
+        configured: true,
+        defaultProvider: 'primary',
+        providerIds: ['primary'],
+        references: [reference],
+      }, 201))
+    let retire: ((retirement: { reason: 'observed'; attachments: readonly unknown[] }) => void) | undefined
+    const activeSession = {
+      sessionId: 'session-1',
+      getSnapshot: vi.fn(() => ({ subagent: null })),
+      beginSubmission: vi.fn((input: {
+        text: string
+        images: readonly unknown[]
+        onRetire?: (retirement: { reason: 'observed'; attachments: readonly unknown[] }) => void
+      }) => {
+        retire = input.onRetire
+        return { requestId: 'request-1', abandon: vi.fn() }
+      }),
+      prompt: vi.fn<BridgeSession['prompt']>(async () => {
+        retire?.({ reason: 'observed', attachments: [] })
+        return { ok: true as const, value: { accepted: true as const } }
+      }),
+    }
+    fake.value.sendSession.mockImplementationOnce(async (active, text, imageIds, mode, signal) => {
+      const sessionFace = active as BridgeSession
+      const submission = sessionFace.beginSubmission({ text, images: [] })
+      const result = await sessionFace.prompt([{ type: 'text', text }], mode, signal, submission.requestId)
+      return result.ok ? successOutcome : { kind: 'error' as const }
+    })
+    const wrapped = createVisionBridgeSendSession(fake.value, fetcher)
+
+    await expect(wrapped(activeSession, 'Read the exact error code.', ['draft-1'], 'queue'))
+      .resolves.toBe(successOutcome)
+
+    expect(activeSession.beginSubmission).toHaveBeenCalledWith(expect.objectContaining({
+      text: 'Read the exact error code.',
+      images: [{ previewUrl: 'blob:test', name: 'clipboard.png' }],
+    }))
+    expect(activeSession.prompt).toHaveBeenCalledWith(
+      [{ type: 'text', text: `Read the exact error code.\n\n[Attached image 1](${reference})` }],
+      'queue',
+      undefined,
+      'request-1',
+    )
     expect(fake.value.releaseDraftImages).toHaveBeenCalledWith([fake.attachment])
   })
 
@@ -495,9 +610,8 @@ describe('browser conversation bridge', () => {
   })
 
   it('returns an error outcome unchanged and preserves bridge draft images', async () => {
-    const fake = conversation()
     const errorOutcome = { kind: 'error', text: 'submission rejected' } as const
-    fake.value.sendSession.mockResolvedValueOnce(errorOutcome as never)
+    const fake = conversation(errorOutcome)
     const reference = 'vision-bridge://attachment/v1/session-1/ref?media=image%2Fpng&bytes=9&width=1&height=1'
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(response(bridgeRoute))
@@ -516,9 +630,8 @@ describe('browser conversation bridge', () => {
   })
 
   it('preserves the original rejection and bridge draft images', async () => {
-    const fake = conversation()
     const failure = new Error('original submission failed')
-    fake.value.sendSession.mockRejectedValueOnce(failure)
+    const fake = conversation(failure)
     const reference = 'vision-bridge://attachment/v1/session-1/ref?media=image%2Fpng&bytes=9&width=1&height=1'
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(response(bridgeRoute))
@@ -534,11 +647,10 @@ describe('browser conversation bridge', () => {
     expect(fake.value.releaseDraftImages).not.toHaveBeenCalled()
   })
 
-  it.each(compositionCases)('composes with a contract-preserving file adapter: %s', async (_label, order, expected, releases) => {
-    const fake = conversation()
+  it.each(compositionCases)('composes with another contract-preserving submission wrapper: %s', async (_label, order, expected, releases) => {
+    const fake = conversation(expected)
     const original = fake.value.sendSession
     const layered: BridgeConversation = fake.value
-    original.mockResolvedValueOnce(expected as never)
     const reference = 'vision-bridge://attachment/v1/session-1/ref?media=image%2Fpng&bytes=9&width=1&height=1'
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(response(bridgeRoute))
@@ -548,12 +660,12 @@ describe('browser conversation bridge', () => {
         providerIds: ['primary'],
         references: [reference],
       }, 201))
-    if (order === 'file-first') {
-      installOpenFileStyleAdapter(layered)
+    if (order === 'outer-first') {
+      installSubmissionWrapper(layered)
       layered.sendSession = createVisionBridgeSendSession(layered, fetcher)
     } else {
       layered.sendSession = createVisionBridgeSendSession(layered, fetcher)
-      installOpenFileStyleAdapter(layered)
+      installSubmissionWrapper(layered)
     }
     const signal = new AbortController().signal
 

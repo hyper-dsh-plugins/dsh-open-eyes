@@ -16,11 +16,13 @@ Open Eyes 支持 OpenAI Responses、OpenAI Chat Completions 和 Anthropic Messag
 
 ## 安装
 
-需要 DeepSeek Harness `0.1.1-rc.2` 和 Node.js `>=22.19.0`。
+需要 Node.js `>=22.19.0`。Open Eyes 与 DSH 采用严格一对一兼容关系，不向前兼容，也不向后兼容。
 
-```sh
-dsh plugin --profile web add dsh-open-eyes@0.1.1-rc.2
-```
+| DeepSeek Harness 版本 | 安装指令 |
+| --- | --- |
+| `0.1.0-rc.6` | `dsh plugin --profile web add dsh-open-eyes@0.1.0` |
+| `0.1.1-rc.2` | `dsh plugin --profile web add dsh-open-eyes@0.1.1-rc.2` |
+| `0.1.2-alpha.1` | `dsh plugin --profile web add dsh-open-eyes@0.1.2-alpha.1` |
 
 安装后重启 DSH Web，并刷新页面。不同 DSH profile 相互独立，需要在每个希望使用 Open Eyes 的 profile 中分别安装。
 
@@ -147,8 +149,7 @@ API Key 只会通过 DSH Credentials 写入凭据存储，不会进入插件 Set
 
 ## 可靠性与兼容性
 
-- 面向 DeepSeek Harness `0.1.1-rc.2` 设计并完成验证。
-- 与 `dsh-open-file@0.1.1-rc.2` 按两种安装顺序共同测试。
+- 每个 Open Eyes 版本仅面向安装表中对应的 DeepSeek Harness 精确版本设计并完成验证，不兼容更早或更晚的 DSH 版本。
 - 纯文本发送和禁用状态的会话继续使用原始 DSH 提交链路。
 - Web 包装层完整保留提交结果、取消信号、异常和草稿图片。
 - 获取模型、连接验证和视觉推理会对有界的短暂网络故障、超时、响应体中断、限流和网关异常进行恢复。默认每次尝试最长五分钟，最多重试两次。
@@ -190,7 +191,7 @@ npm pack --dry-run
 pnpm run test:e2e
 ```
 
-测试不需要付费视觉 API。打包 E2E 会在临时 DSH profile 中安装、启动并移除真实 tarball，同时验证与 `dsh-open-file` 的两种安装顺序。
+测试不需要付费视觉 API。打包 E2E 会在临时 DSH profile 中安装、启动并移除真实 tarball。
 
 ## 许可证
 

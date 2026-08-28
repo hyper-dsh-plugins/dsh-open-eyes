@@ -16,6 +16,9 @@ describe('bundled vision-bridge skill', () => {
       invocation: { modelInvocable: true, userInvocable: true },
       source: 'bundled',
     })
+    expect(loaded?.description).toContain('`Attached image` links')
+    expect(loaded?.description).toContain('local image paths')
+    expect(loaded?.description).toContain('HTTP(S) image URLs')
     expect(loaded?.content).toContain('visual delegation')
     expect(loaded?.content).toContain('untrusted evidence')
     expect(loaded?.content).toContain('current default scheme at call time')

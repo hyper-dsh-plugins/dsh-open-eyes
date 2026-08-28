@@ -31,10 +31,9 @@ interface RpcError {
   readonly message: string
 }
 
-type RpcResponse<T> = {
-  readonly result: { readonly ok: true; readonly value: T }
-    | { readonly ok: false; readonly error: RpcError }
-}
+type RemoteResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: RpcError }
 
 export interface CredentialStatus {
   readonly configured: boolean
@@ -44,27 +43,27 @@ export interface CredentialStatus {
 
 export interface SettingsCardApi {
   readonly settings: {
-    describe(payload: {}): Promise<RpcResponse<{
+    describe(): Promise<RemoteResult<{
+      readonly writable: boolean
+      readonly hasDocument: boolean
       readonly namespaces: readonly {
         readonly ns: string
         readonly value: unknown
       }[]
     }>>
-    mutate(payload: {
-      readonly ns: string
-      readonly ops: readonly (
+    mutate(
+      ns: string,
+      ops: readonly (
         | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
         | { readonly op: 'unset'; readonly path: readonly string[] }
-      )[]
-      readonly expectedRevision?: number
-    }): Promise<RpcResponse<unknown>>
+      )[],
+      expectedRevision: number | undefined,
+    ): Promise<RemoteResult<unknown>>
   }
   readonly credentials: {
-    describe(payload: { readonly refs: readonly string[] }): Promise<RpcResponse<{
-      readonly credentials: Readonly<Record<string, CredentialStatus>>
-    }>>
-    set(payload: { readonly ref: string; readonly value: string }): Promise<RpcResponse<unknown>>
-    unset(payload: { readonly ref: string }): Promise<RpcResponse<unknown>>
+    describe(refs: readonly string[]): Promise<RemoteResult<Readonly<Record<string, CredentialStatus>>>>
+    set(ref: string, value: string): Promise<RemoteResult<unknown>>
+    unset(ref: string): Promise<RemoteResult<unknown>>
   }
 }
 
@@ -278,8 +277,8 @@ export async function prepareProviderModelDiscovery(
   if (credential === undefined) return { ok: false, error: 'missing-api-key' }
   if (entered) {
     try {
-      const response = await api.credentials.set({ ref: credential, value: draft.apiKey })
-      if (!response.result.ok) return { ok: false, error: 'credential-write-failed' }
+      const response = await api.credentials.set(credential, draft.apiKey)
+      if (!response.ok) return { ok: false, error: 'credential-write-failed' }
     } catch {
       return { ok: false, error: 'credential-write-failed' }
     }
@@ -363,9 +362,9 @@ async function committedProfileUsesCredential(
   credential: string,
 ): Promise<boolean | undefined> {
   try {
-    const response = await api.settings.describe({})
-    if (!response.result.ok) return undefined
-    const namespace = response.result.value.namespaces.find(item => item.ns === VISION_BRIDGE_SETTINGS_NAMESPACE)
+    const response = await api.settings.describe()
+    if (!response.ok) return undefined
+    const namespace = response.value.namespaces.find(item => item.ns === VISION_BRIDGE_SETTINGS_NAMESPACE)
     if (namespace === undefined || !isRecord(namespace.value)) return false
     const profiles = namespace.value.profiles
     if (!isRecord(profiles)) return false
@@ -378,8 +377,8 @@ async function committedProfileUsesCredential(
 
 async function rollbackCredential(api: SettingsCardApi, credential: string): Promise<boolean> {
   try {
-    const response = await api.credentials.unset({ ref: credential })
-    return response.result.ok
+    const response = await api.credentials.unset(credential)
+    return response.ok
   } catch {
     return false
   }
@@ -421,7 +420,7 @@ export async function saveProviderProfile(
   if (prepared.apiKey !== undefined && prepared.credential !== undefined) {
     let credentialResponse: Awaited<ReturnType<SettingsCardApi['credentials']['set']>>
     try {
-      credentialResponse = await api.credentials.set({ ref: prepared.credential, value: prepared.apiKey })
+      credentialResponse = await api.credentials.set(prepared.credential, prepared.apiKey)
     } catch {
       return {
         ok: false,
@@ -430,7 +429,7 @@ export async function saveProviderProfile(
         error: 'credential-write-failed',
       }
     }
-    if (!credentialResponse.result.ok) {
+    if (!credentialResponse.ok) {
       return {
         ok: false,
         profileCommitted: false,
@@ -462,11 +461,7 @@ export async function saveProviderProfile(
   }
   let profileResponse: Awaited<ReturnType<SettingsCardApi['settings']['mutate']>>
   try {
-    profileResponse = await api.settings.mutate({
-      ns: VISION_BRIDGE_SETTINGS_NAMESPACE,
-      ops,
-      expectedRevision: options.revision,
-    })
+    profileResponse = await api.settings.mutate(VISION_BRIDGE_SETTINGS_NAMESPACE, ops, options.revision)
   } catch {
     if (credentialCommitted && prepared.credential !== undefined) {
       const referenced = await committedProfileUsesCredential(api, prepared.id, prepared.credential)
@@ -485,7 +480,7 @@ export async function saveProviderProfile(
     }
     return { ok: false, profileCommitted: false, credentialCommitted, error: 'settings-write-failed' }
   }
-  if (!profileResponse.result.ok) {
+  if (!profileResponse.ok) {
     if (credentialCommitted && prepared.credential !== undefined) {
       credentialCommitted = !(await rollbackCredential(api, prepared.credential))
     }
@@ -521,15 +516,15 @@ export async function setOpenEyesEnabled(
   const lastAt = history.at(-1)?.effectiveAt ?? 0
   const effectiveAt = Math.max(options.now ?? Date.now(), lastAt + 1)
   try {
-    const response = await api.settings.mutate({
-      ns: VISION_BRIDGE_SETTINGS_NAMESPACE,
-      ops: [
+    const response = await api.settings.mutate(
+      VISION_BRIDGE_SETTINGS_NAMESPACE,
+      [
         { op: 'set', path: ['enabled'], value: enabled },
         { op: 'set', path: ['enablementHistory'], value: [...history, { effectiveAt, enabled }] },
       ],
-      expectedRevision: options.revision,
-    })
-    return response.result.ok ? { ok: true } : { ok: false, error: response.result.error.message }
+      options.revision,
+    )
+    return response.ok ? { ok: true } : { ok: false, error: response.error.message }
   } catch {
     return { ok: false, error: 'settings-write-failed' }
   }
@@ -558,16 +553,16 @@ export async function setOpenEyesPreferences(
     return { ok: false, error: 'preference-too-long' }
   }
   try {
-    const response = await api.settings.mutate({
-      ns: VISION_BRIDGE_SETTINGS_NAMESPACE,
-      ops: [
+    const response = await api.settings.mutate(
+      VISION_BRIDGE_SETTINGS_NAMESPACE,
+      [
         { op: 'set', path: ['visualAnalysis'], value: visualAnalysis },
         { op: 'set', path: ['focusAreas'], value: focusAreas },
         { op: 'set', path: ['preference'], value: preference },
       ],
-      expectedRevision: revision,
-    })
-    return response.result.ok ? { ok: true } : { ok: false, error: response.result.error.message }
+      revision,
+    )
+    return response.ok ? { ok: true } : { ok: false, error: response.error.message }
   } catch {
     return { ok: false, error: 'settings-write-failed' }
   }
@@ -579,12 +574,12 @@ export async function selectDefaultProvider(
   revision: number,
 ): Promise<SettingsWriteResult> {
   try {
-    const response = await api.settings.mutate({
-      ns: VISION_BRIDGE_SETTINGS_NAMESPACE,
-      ops: [{ op: 'set', path: ['defaultProvider'], value: profileId }],
-      expectedRevision: revision,
-    })
-    return response.result.ok ? { ok: true } : { ok: false, error: response.result.error.message }
+    const response = await api.settings.mutate(
+      VISION_BRIDGE_SETTINGS_NAMESPACE,
+      [{ op: 'set', path: ['defaultProvider'], value: profileId }],
+      revision,
+    )
+    return response.ok ? { ok: true } : { ok: false, error: response.error.message }
   } catch {
     return { ok: false, error: 'settings-write-failed' }
   }
@@ -617,12 +612,8 @@ export async function deleteProviderProfile(
     else ops.push({ op: 'set', path: ['defaultProvider'], value: next })
   }
   try {
-    const response = await api.settings.mutate({
-      ns: VISION_BRIDGE_SETTINGS_NAMESPACE,
-      ops,
-      expectedRevision: options.revision,
-    })
-    return response.result.ok ? { ok: true } : { ok: false, error: response.result.error.message }
+    const response = await api.settings.mutate(VISION_BRIDGE_SETTINGS_NAMESPACE, ops, options.revision)
+    return response.ok ? { ok: true } : { ok: false, error: response.error.message }
   } catch {
     return { ok: false, error: 'settings-write-failed' }
   }

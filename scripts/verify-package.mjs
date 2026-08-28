@@ -37,7 +37,7 @@ const [manifestText, clientBundle, readme, readmeZh] = await Promise.all([
   readFile(new URL('../README.zh-CN.md', import.meta.url), 'utf8'),
 ])
 const manifest = JSON.parse(manifestText)
-if (manifest.name !== PACKAGE_NAME || manifest.version !== '0.1.1-rc.2') {
+if (manifest.name !== PACKAGE_NAME || manifest.version !== '0.1.2-alpha.1') {
   throw new Error('unexpected package identity')
 }
 if (manifest.license !== 'MIT' || manifest.repository?.url !== 'git+https://github.com/Hyp6666/dsh-open-eyes.git') {
@@ -65,6 +65,18 @@ if (manifest.dsh?.bundle?.patch !== './cordis.patch.yml') {
 }
 if (manifest.dsh?.client?.platform !== 'web' || manifest.exports?.['./client'] === undefined) {
   throw new Error('missing dsh.client Web bundle declaration')
+}
+const expectedClientInject = [
+  '@deepseek-ai/dsh-api-remotes',
+  '@deepseek-ai/dsh-client-locale',
+  '@deepseek-ai/dsh-client-ui-chat',
+  '@deepseek-ai/dsh-client-ui-conversation',
+  '@deepseek-ai/dsh-client-ui-renderer',
+  '@deepseek-ai/dsh-client-ui-settings',
+  '@deepseek-ai/dsh-client-ui-settings-plugins',
+]
+if (JSON.stringify(manifest.dsh?.client?.inject) !== JSON.stringify(expectedClientInject)) {
+  throw new Error('Web client inject list must match the DSH 0.1.2-alpha.1 Remote/UI services')
 }
 if (manifest.peerDependencies?.react !== '^18.2.0' || !clientBundle.includes('require("react")')) {
   throw new Error('Web client must reuse the DSH React runtime instead of bundling a private copy')
@@ -98,4 +110,10 @@ if (!clientBundle.includes('settings.plugin.item') || !clientBundle.includes('vi
 }
 if (!clientBundle.includes('credentials.set') || !clientBundle.includes('settings.mutate')) {
   throw new Error('Web client is missing the separated settings and credential write seams')
+}
+if (!clientBundle.includes('conversation.message.images') || !clientBundle.includes('beginSubmission')) {
+  throw new Error('Web client is missing the alpha.1 image renderer or immediate-echo seam')
+}
+if (clientBundle.includes('connection.api')) {
+  throw new Error('Web client must not use the removed connection.api transport')
 }

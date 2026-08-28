@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -9,12 +9,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 const run = promisify(execFile)
 const enabled = process.env.DSH_PACK_E2E === '1'
 const suite = enabled ? describe : describe.skip
+const dshExecutable = path.resolve(process.env.DSH_E2E_BIN ?? 'node_modules/.bin/dsh')
 
 suite('packed package install in an isolated DSH web profile', () => {
   let root: string
   let dshHome: string
   let tarball: string
-  let openFileTarball: string
   let tarEntries: string[]
   let web: ChildProcessWithoutNullStreams | undefined
 
@@ -29,17 +29,6 @@ suite('packed package install in an isolated DSH web profile', () => {
     tarball = path.join(root, packed[0]!.filename)
     const listing = await run('tar', ['-tzf', tarball], { maxBuffer: 10 * 1024 * 1024 })
     tarEntries = listing.stdout.trim().split('\n')
-    const suppliedOpenFile = process.env.DSH_OPEN_FILE_TARBALL
-    if (suppliedOpenFile !== undefined) {
-      openFileTarball = path.resolve(suppliedOpenFile)
-      await access(openFileTarball)
-    } else {
-      const packedOpenFile = await run('npm', [
-        'pack', 'dsh-open-file@0.1.1-rc.2', '--ignore-scripts', '--json', '--pack-destination', root,
-      ], { cwd: root, maxBuffer: 10 * 1024 * 1024 })
-      const openFilePackage = JSON.parse(packedOpenFile.stdout) as Array<{ filename: string }>
-      openFileTarball = path.join(root, openFilePackage[0]!.filename)
-    }
   })
 
   afterAll(async () => {
@@ -55,13 +44,13 @@ suite('packed package install in an isolated DSH web profile', () => {
     return new Promise((resolve) => child.once('exit', () => resolve()))
   }
 
-  async function startWeb(dsh: string, environment: NodeJS.ProcessEnv): Promise<string> {
+  async function startWeb(dsh: string, environment: NodeJS.ProcessEnv): Promise<{ origin: string; cookie: string }> {
     web = spawn(dsh, ['--profile', 'web', '--port', '0'], {
       cwd: new URL('..', import.meta.url),
       env: environment,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
-    return await new Promise<string>((resolve, reject) => {
+    const launchUrl = await new Promise<string>((resolve, reject) => {
       let output = ''
       const timer = setTimeout(() => reject(new Error(`timed out starting packed Web profile: ${output}`)), 30_000)
       const finish = (error: Error | undefined, origin?: string): void => {
@@ -71,13 +60,18 @@ suite('packed package install in an isolated DSH web profile', () => {
       }
       web!.stdout.on('data', (chunk: Buffer) => {
         output += chunk.toString('utf8')
-        const match = /dsh web: (http:\/\/127\.0\.0\.1:[0-9]+)/u.exec(output)
+        const match = /dsh web: (http:\/\/[^\s]+)/u.exec(output)
         if (match?.[1] !== undefined) finish(undefined, match[1])
       })
       web!.stderr.on('data', (chunk: Buffer) => { output += chunk.toString('utf8') })
       web!.once('exit', code => finish(new Error(`packed Web profile exited early (${String(code)}): ${output}`)))
       web!.once('error', error => finish(error))
     })
+    const exchange = await fetch(launchUrl, { redirect: 'manual' })
+    expect(exchange.status).toBe(303)
+    const setCookie = exchange.headers.get('set-cookie')
+    if (setCookie === null) throw new Error('packed Web profile omitted its authentication cookie')
+    return { origin: new URL(launchUrl).origin, cookie: setCookie.split(';', 1)[0]! }
   }
 
   async function stopWeb(): Promise<void> {
@@ -110,9 +104,9 @@ suite('packed package install in an isolated DSH web profile', () => {
   })
 
   it('adds both rows, dumps them, removes the package, and leaves neither row', async () => {
-    const dsh = path.resolve('node_modules/.bin/dsh')
+    const dsh = dshExecutable
     const environment = { ...process.env, DSH_HOME: dshHome }
-    await run(dsh, ['plugin', '--profile', 'web', 'add', tarball], {
+    await run(dsh, ['plugin', '--profile', 'web', 'add', tarball, '--config.auto-install-peers=false'], {
       cwd: new URL('..', import.meta.url),
       env: environment,
       maxBuffer: 20 * 1024 * 1024,
@@ -127,15 +121,26 @@ suite('packed package install in an isolated DSH web profile', () => {
     expect(installed.stdout).toMatch(/^\s*name: ['"]?dsh-open-eyes['"]?\s*$/mu)
     expect(installed.stdout).toMatch(/^\s*name: ['"]?dsh-open-eyes\/skill['"]?\s*$/mu)
 
-    const origin = await startWeb(dsh, environment)
-    const index = await fetch(`${origin}/`)
+    const { origin, cookie } = await startWeb(dsh, environment)
+    const authenticated = { headers: { cookie } }
+    const index = await fetch(`${origin}/`, authenticated)
     expect(index.status).toBe(200)
     const html = await index.text()
-    expect(html).toContain('"id":"dsh-open-eyes"')
-    expect(html).toContain('"inject":["@deepseek-ai/dsh-client-connection","@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-ui-conversation","@deepseek-ai/dsh-client-ui-settings","@deepseek-ai/dsh-client-ui-settings-plugins"]')
-    const bundleUrl = /"id":"dsh-open-eyes","url":"([^"]+\/client\.js\?rev=[^"]+)"/u.exec(html)?.[1]
-    expect(bundleUrl).toBeDefined()
-    const bundle = await fetch(new URL(bundleUrl!, origin))
+    const graphText = /globalThis\["__DSH_BOOT__"\] = (\{[^\n<]+\})<\/script>/u.exec(html)?.[1]
+    expect(graphText).toBeDefined()
+    const graph = JSON.parse(graphText!) as { entries: Array<{ id: string; url: string; inject?: string[] }> }
+    const openEyesEntry = graph.entries.find(entry => entry.id === 'dsh-open-eyes')
+    expect(openEyesEntry?.inject).toEqual([
+      '@deepseek-ai/dsh-api-remotes',
+      '@deepseek-ai/dsh-client-locale',
+      '@deepseek-ai/dsh-client-ui-chat',
+      '@deepseek-ai/dsh-client-ui-conversation',
+      '@deepseek-ai/dsh-client-ui-renderer',
+      '@deepseek-ai/dsh-client-ui-settings',
+      '@deepseek-ai/dsh-client-ui-settings-plugins',
+    ])
+    expect(openEyesEntry?.url).toBeDefined()
+    const bundle = await fetch(new URL(openEyesEntry!.url, origin), authenticated)
     expect(bundle.status).toBe(200)
     const bundleText = await bundle.text()
     expect(bundleText).toContain('id: "dsh-open-eyes"')
@@ -147,22 +152,26 @@ suite('packed package install in an isolated DSH web profile', () => {
     expect(bundleText).toContain('require("react")')
     expect(bundleText).toContain('react.createElement)(stock, props)')
     expect(bundleText).toContain('settings.plugin.item')
+    expect(bundleText).toContain('conversation.message.images')
+    expect(bundleText).toContain('beginSubmission')
     expect(bundleText).toContain('credentials.set')
+    expect(bundleText).not.toContain('connection.api')
+    expect(bundleText).not.toContain('conversation.resolveImage')
     expect([...bundleText.matchAll(/require\("([^"]+)"\)/gu)].map(match => match[1])).toEqual([
       'react',
       '@deepseek-ai/dsh-client-ui-primitives',
     ])
     expect(bundleText).not.toContain('Vision Bridge WebUI handoff')
     expect(bundleText).not.toContain('node:fs')
-    const bridgeRoute = await fetch(`${origin}/vision-bridge/v1/web-drafts`)
+    const bridgeRoute = await fetch(`${origin}/vision-bridge/v1/web-drafts`, authenticated)
     expect(bridgeRoute.status).toBe(405)
-    const capabilityRoute = await fetch(`${origin}/vision-bridge/v1/web-image-route`)
+    const capabilityRoute = await fetch(`${origin}/vision-bridge/v1/web-image-route`, authenticated)
     expect(capabilityRoute.status).toBe(405)
-    const attachmentRoute = await fetch(`${origin}/vision-bridge/v1/web-attachment`)
+    const attachmentRoute = await fetch(`${origin}/vision-bridge/v1/web-attachment`, authenticated)
     expect(attachmentRoute.status).toBe(405)
-    const validationRoute = await fetch(`${origin}/vision-bridge/v1/provider-validation`)
+    const validationRoute = await fetch(`${origin}/vision-bridge/v1/provider-validation`, authenticated)
     expect(validationRoute.status).toBe(405)
-    const modelsRoute = await fetch(`${origin}/vision-bridge/v1/provider-models`)
+    const modelsRoute = await fetch(`${origin}/vision-bridge/v1/provider-models`, authenticated)
     expect(modelsRoute.status).toBe(405)
 
     await stopWeb()
@@ -187,10 +196,11 @@ suite('packed package install in an isolated DSH web profile', () => {
         client: {
           platform: 'web',
           inject: [
-            '@deepseek-ai/dsh-client-connection',
+            '@deepseek-ai/dsh-api-remotes',
             '@deepseek-ai/dsh-client-locale',
-            '@deepseek-ai/dsh-client-runtime',
+            '@deepseek-ai/dsh-client-ui-chat',
             '@deepseek-ai/dsh-client-ui-conversation',
+            '@deepseek-ai/dsh-client-ui-renderer',
             '@deepseek-ai/dsh-client-ui-settings',
             '@deepseek-ai/dsh-client-ui-settings-plugins',
           ],
@@ -199,46 +209,4 @@ suite('packed package install in an isolated DSH web profile', () => {
     })
   }, 120_000)
 
-  it.each(['dsh-open-file first', 'dsh-open-eyes first'] as const)(
-    'boots and removes both client plugins when installed with %s', async (label) => {
-    const dsh = path.resolve('node_modules/.bin/dsh')
-    const orderId = label === 'dsh-open-file first' ? 'file-first' : 'eyes-first'
-    const environment = { ...process.env, DSH_HOME: path.join(root, `dsh-home-${orderId}`) }
-    const packages = label === 'dsh-open-file first'
-      ? [openFileTarball, tarball]
-      : [tarball, openFileTarball]
-    for (const packageTarball of packages) {
-      await run(dsh, ['plugin', '--profile', 'web', 'add', packageTarball], {
-        cwd: new URL('..', import.meta.url),
-        env: environment,
-        maxBuffer: 20 * 1024 * 1024,
-      })
-    }
-
-    const installed = await run(dsh, ['--profile', 'web', '--dump-config'], {
-      cwd: new URL('..', import.meta.url),
-      env: environment,
-      maxBuffer: 20 * 1024 * 1024,
-    })
-    expect(installed.stdout).toContain('id: vision-bridge')
-
-    const origin = await startWeb(dsh, environment)
-    const index = await fetch(`${origin}/`)
-    expect(index.status).toBe(200)
-    const html = await index.text()
-    expect(html).toContain('"id":"dsh-open-eyes"')
-    expect(html).toContain('"id":"dsh-open-file"')
-    await stopWeb()
-
-    await run(dsh, ['plugin', '--profile', 'web', 'remove', 'dsh-open-eyes'], {
-      cwd: new URL('..', import.meta.url), env: environment, maxBuffer: 20 * 1024 * 1024,
-    })
-    await run(dsh, ['plugin', '--profile', 'web', 'remove', 'dsh-open-file'], {
-      cwd: new URL('..', import.meta.url), env: environment, maxBuffer: 20 * 1024 * 1024,
-    })
-    const removed = await run(dsh, ['--profile', 'web', '--dump-config'], {
-      cwd: new URL('..', import.meta.url), env: environment, maxBuffer: 20 * 1024 * 1024,
-    })
-    expect(removed.stdout).not.toContain('id: vision-bridge')
-  }, 180_000)
 })
