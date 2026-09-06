@@ -14,7 +14,7 @@ describe('publish metadata for the Web client half', () => {
       devDependencies: Record<string, string>
       scripts: Record<string, string>
     }
-    expect(manifest.version).toBe('0.1.2-alpha.1')
+    expect(manifest.version).toBe('0.1.2-rc.1')
     expect(manifest.name).toBe(PACKAGE_NAME)
     expect(PACKAGE_NAME_AVAILABLE).toBe(true)
     expect(manifest.scripts.prepublishOnly).toBe('node scripts/verify-publish-name.mjs')
@@ -39,7 +39,7 @@ describe('publish metadata for the Web client half', () => {
       ...manifest.devDependencies,
     })) {
       if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) {
-        expect(version, name).toBe('0.1.2-alpha.1')
+        expect(version, name).toBe('0.1.2-rc.1')
       }
     }
     expect(manifest.scripts.build).toContain('tsdown')

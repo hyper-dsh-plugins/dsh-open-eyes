@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
+import type { ConversationController } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   buildBridgePrompt,
   createVisionBridgeSendSession,
@@ -13,6 +14,8 @@ import { BRIDGE_REFERENCE_FIELD } from '../src/client/chat-render.js'
 import { WEB_ATTACHMENT_ENDPOINT } from '../src/web-contract.js'
 
 const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00])
+
+type OfficialSession = Parameters<ConversationController['sendSession']>[0]
 
 const successOutcome = { kind: 'success' } as const satisfies BridgeSubmitOutcome
 
@@ -41,7 +44,7 @@ function conversation(result: BridgeSubmitOutcome | Error = successOutcome) {
       return result
     }
     const images = imageIds.map(() => ({ previewUrl: 'blob:test', name: 'clipboard.png' }))
-    const submission = activeSession.beginSubmission({ text, images })
+    const submission = activeSession.beginSubmission({ mode, text, images })
     if (result instanceof Error) {
       submission.abandon()
       throw result
@@ -471,6 +474,8 @@ describe('browser conversation bridge', () => {
   })
 
   it('routes an enabled session, then sends only user text and attachment links', async () => {
+    expectTypeOf<Parameters<BridgeSession['beginSubmission']>[0]>()
+      .toExtend<Parameters<OfficialSession['beginSubmission']>[0]>()
     const fake = conversation()
     const reference = 'vision-bridge://attachment/v1/session-1/ref?media=image%2Fpng&bytes=9&width=1&height=1'
     const fetcher = vi.fn<typeof fetch>()
@@ -516,7 +521,7 @@ describe('browser conversation bridge', () => {
     expect(fake.value.releaseDraftImages).toHaveBeenCalledWith([fake.attachment])
   })
 
-  it('echoes the original text and draft previews while sending only durable bridge links', async () => {
+  it.each(['queue', 'steer'] as const)('echoes the original text and previews with %s placement while sending only durable links', async (mode) => {
     const fake = conversation()
     const reference = 'vision-bridge://attachment/v1/session-1/ref?media=image%2Fpng&bytes=9&width=1&height=1'
     const fetcher = vi.fn<typeof fetch>()
@@ -546,22 +551,23 @@ describe('browser conversation bridge', () => {
     }
     fake.value.sendSession.mockImplementationOnce(async (active, text, imageIds, mode, signal) => {
       const sessionFace = active as BridgeSession
-      const submission = sessionFace.beginSubmission({ text, images: [] })
+      const submission = sessionFace.beginSubmission({ mode, text, images: [] })
       const result = await sessionFace.prompt([{ type: 'text', text }], mode, signal, submission.requestId)
       return result.ok ? successOutcome : { kind: 'error' as const }
     })
     const wrapped = createVisionBridgeSendSession(fake.value, fetcher)
 
-    await expect(wrapped(activeSession, 'Read the exact error code.', ['draft-1'], 'queue'))
+    await expect(wrapped(activeSession, 'Read the exact error code.', ['draft-1'], mode))
       .resolves.toBe(successOutcome)
 
     expect(activeSession.beginSubmission).toHaveBeenCalledWith(expect.objectContaining({
+      mode,
       text: 'Read the exact error code.',
       images: [{ previewUrl: 'blob:test', name: 'clipboard.png' }],
     }))
     expect(activeSession.prompt).toHaveBeenCalledWith(
       [{ type: 'text', text: `Read the exact error code.\n\n[Attached image 1](${reference})` }],
-      'queue',
+      mode,
       undefined,
       'request-1',
     )

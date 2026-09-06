@@ -308,25 +308,25 @@ function markActive(): () => void {
 export function apply(ctx: ClientContextLike): void {
   const conversation = canonicalConversation(ctx.get('conversation'))
   if (conversation === undefined) {
-    throw new Error('vision-bridge/client: incompatible conversation service; expected DSH 0.1.2-alpha.1')
+    throw new Error('vision-bridge/client: incompatible conversation service; expected DSH 0.1.2-rc.1')
   }
   const remote = remoteService(ctx.get('remote'))
   const slots = ctx.get('slots')
   if (slots === undefined || typeof (slots as SlotsServiceLike).register !== 'function'
     || typeof (slots as SlotsServiceLike).entries !== 'function'
     || typeof (slots as SlotsServiceLike).inject !== 'function') {
-    throw new Error('vision-bridge/client: incompatible slots service; expected DSH 0.1.2-alpha.1')
+    throw new Error('vision-bridge/client: incompatible slots service; expected DSH 0.1.2-rc.1')
   }
   const settingsScope = settingsScopeBinder(ctx.get('settingsScope'))
   if (settingsScope === undefined) {
-    throw new Error('vision-bridge/client: incompatible settings scope; expected DSH 0.1.2-alpha.1')
+    throw new Error('vision-bridge/client: incompatible settings scope; expected DSH 0.1.2-rc.1')
   }
   const locale = localeService(ctx.get('locale'))
   if (locale === undefined) {
-    throw new Error('vision-bridge/client: incompatible locale service; expected DSH 0.1.2-alpha.1')
+    throw new Error('vision-bridge/client: incompatible locale service; expected DSH 0.1.2-rc.1')
   }
   if (remote === undefined) {
-    throw new Error('vision-bridge/client: incompatible Remote service; expected DSH 0.1.2-alpha.1')
+    throw new Error('vision-bridge/client: incompatible Remote service; expected DSH 0.1.2-rc.1')
   }
 
   if (Object.hasOwn(conversation, PATCH_MARKER)) {

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2-rc.1] - 2026-09-06
+
+### Fixed
+
+- Updated compatibility with DeepSeek Harness `0.1.2-rc.1`, including plugin startup and image submission.
+
 ## [0.1.2-alpha.1] - 2026-08-28
 
 ### Changed

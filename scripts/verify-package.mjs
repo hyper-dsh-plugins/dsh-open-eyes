@@ -37,7 +37,7 @@ const [manifestText, clientBundle, readme, readmeZh] = await Promise.all([
   readFile(new URL('../README.zh-CN.md', import.meta.url), 'utf8'),
 ])
 const manifest = JSON.parse(manifestText)
-if (manifest.name !== PACKAGE_NAME || manifest.version !== '0.1.2-alpha.1') {
+if (manifest.name !== PACKAGE_NAME || manifest.version !== '0.1.2-rc.1') {
   throw new Error('unexpected package identity')
 }
 if (manifest.license !== 'MIT' || manifest.repository?.url !== 'git+https://github.com/Hyp6666/dsh-open-eyes.git') {
@@ -76,7 +76,7 @@ const expectedClientInject = [
   '@deepseek-ai/dsh-client-ui-settings-plugins',
 ]
 if (JSON.stringify(manifest.dsh?.client?.inject) !== JSON.stringify(expectedClientInject)) {
-  throw new Error('Web client inject list must match the DSH 0.1.2-alpha.1 Remote/UI services')
+  throw new Error('Web client inject list must match the DSH 0.1.2-rc.1 Remote/UI services')
 }
 if (manifest.peerDependencies?.react !== '^18.2.0' || !clientBundle.includes('require("react")')) {
   throw new Error('Web client must reuse the DSH React runtime instead of bundling a private copy')
@@ -112,7 +112,7 @@ if (!clientBundle.includes('credentials.set') || !clientBundle.includes('setting
   throw new Error('Web client is missing the separated settings and credential write seams')
 }
 if (!clientBundle.includes('conversation.message.images') || !clientBundle.includes('beginSubmission')) {
-  throw new Error('Web client is missing the alpha.1 image renderer or immediate-echo seam')
+  throw new Error('Web client is missing the rc.1 image renderer or immediate-echo seam')
 }
 if (clientBundle.includes('connection.api')) {
   throw new Error('Web client must not use the removed connection.api transport')

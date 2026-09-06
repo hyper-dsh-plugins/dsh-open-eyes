@@ -23,6 +23,7 @@ Requires Node.js `>=22.19.0`. Open Eyes requires exact one-to-one version matchi
 | `0.1.0-rc.6` | `dsh plugin --profile web add dsh-open-eyes@0.1.0` |
 | `0.1.1-rc.2` | `dsh plugin --profile web add dsh-open-eyes@0.1.1-rc.2` |
 | `0.1.2-alpha.1` | `dsh plugin --profile web add dsh-open-eyes@0.1.2-alpha.1` |
+| `0.1.2-rc.1` | `dsh plugin --profile web add dsh-open-eyes@0.1.2-rc.1` |
 
 Restart DSH Web after installation, then reload the page. DSH profiles are independent, so install the plugin separately in every profile where you want to use it.
 

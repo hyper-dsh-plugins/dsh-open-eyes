@@ -7,6 +7,7 @@ export interface BridgeSession {
   readonly sessionId: string
   getSnapshot(): { readonly subagent: unknown | null }
   beginSubmission(input: {
+    readonly mode: BridgeSubmitMode
     readonly text: string
     readonly images: readonly {
       readonly previewUrl: string
@@ -89,7 +90,7 @@ async function serializeDraft(file: File): Promise<SerializedDraft> {
   }
 }
 
-/** Give alpha.1's local echo one browser paint before image serialization/upload work. */
+/** Give rc.1's local echo one browser paint before image serialization/upload work. */
 function nextPaint(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof requestAnimationFrame !== 'function') {
@@ -122,12 +123,12 @@ function echoImages(attachments: readonly BridgeDraftAttachment[]) {
 }
 
 /**
- * alpha.1 has no public pre-admission middleware or separate echo/durable text
+ * rc.1 has no public pre-admission middleware or separate echo/durable text
  * fields. Register the truthful local echo first, then let the exact official
  * sendSession chain perform its normal prompt call while substituting only the
  * already-created submission handle at its synchronous beginSubmission seam.
  */
-async function sendWithAlpha1Echo(
+async function sendWithRc1Echo(
   conversation: BridgeConversation,
   original: BridgeConversation['sendSession'],
   session: BridgeSession,
@@ -148,6 +149,7 @@ async function sendWithAlpha1Echo(
   let finishRetirement: ((retirement: BridgeSubmissionRetirement) => void) | undefined
   const retirement = new Promise<BridgeSubmissionRetirement>((resolve) => { finishRetirement = resolve })
   const submission = session.beginSubmission({
+    mode,
     text: displayText,
     images: echoImages(attachments),
     onRetire: (settlement) => {
@@ -189,7 +191,7 @@ async function sendWithAlpha1Echo(
   }
   if (!consumed) {
     submission.abandon()
-    throw new Error('Vision Bridge could not enter the DSH 0.1.2-alpha.1 submission seam.')
+    throw new Error('Vision Bridge could not enter the DSH 0.1.2-rc.1 submission seam.')
   }
   const outcome = await pending
   if (outcome.kind !== 'success') return outcome
@@ -320,7 +322,7 @@ export function createVisionBridgeSendSession(
     if (attachments.length !== imageIds.length) {
       throw new Error('Vision Bridge could not resolve one or more pasted image drafts.')
     }
-    return sendWithAlpha1Echo(conversation, original, session, text, async () => {
+    return sendWithRc1Echo(conversation, original, session, text, async () => {
       const images: SerializedDraft[] = []
       for (const attachment of attachments) images.push(await serializeDraft(attachment.file))
       const upload = await uploadDrafts(session.sessionId, images, fetcher, signal)

@@ -1,5 +1,4 @@
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import {
   AUTH_MODES,
   PROTOCOLS,
@@ -16,7 +15,7 @@ import {
 import { VISUAL_ANALYSIS_MODES, VISUAL_FOCUS_AREAS } from './visual-preferences.js'
 
 /** Settings namespace paired with the card in Settings → Plugins. */
-export const VISION_BRIDGE_SETTINGS_NAMESPACE = settingsNamespace(VISION_BRIDGE_SETTINGS_NAMESPACE_NAME)
+export const VISION_BRIDGE_SETTINGS_NAMESPACE = VISION_BRIDGE_SETTINGS_NAMESPACE_NAME
 
 const ProviderProfileSchema: z<VisionBridgeProviderProfile> = z.object({
   displayName: z.string().max(120),

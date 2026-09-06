@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+import '@deepseek-ai/dsh-settings'
 import { Config as ConfigSchema, validateConfig } from './config.js'
 import type { Config as VisionBridgeConfig } from './config.js'
 import { createVisionTool } from './tool.js'
@@ -38,14 +38,16 @@ export function apply(ctx: Context, config: Config) {
   const refreshConfig = (): void => {
     resolved = resolveConfigFromSettings(config, settingsSource())
   }
-  installSettingsSection(ctx, VISION_BRIDGE_SETTINGS_NAMESPACE, VisionBridgeSettingsSchema, settingsBase, {
-    setSource(source) {
-      settingsSource = source
-    },
-    onChange: refreshConfig,
-    validate(settings) {
-      resolveConfigFromSettings(config, settings)
-    },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, VISION_BRIDGE_SETTINGS_NAMESPACE, VisionBridgeSettingsSchema, settingsBase, {
+      setSource(source) {
+        settingsSource = source
+      },
+      onChange: refreshConfig,
+      validate(settings) {
+        resolveConfigFromSettings(config, settings)
+      },
+    })
   })
   ctx.on('agent/session-start', ({ agent, source }) => {
     enablement.onSessionStart(agent.session, source)

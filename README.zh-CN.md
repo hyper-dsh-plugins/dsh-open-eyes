@@ -23,6 +23,7 @@ Open Eyes 支持 OpenAI Responses、OpenAI Chat Completions 和 Anthropic Messag
 | `0.1.0-rc.6` | `dsh plugin --profile web add dsh-open-eyes@0.1.0` |
 | `0.1.1-rc.2` | `dsh plugin --profile web add dsh-open-eyes@0.1.1-rc.2` |
 | `0.1.2-alpha.1` | `dsh plugin --profile web add dsh-open-eyes@0.1.2-alpha.1` |
+| `0.1.2-rc.1` | `dsh plugin --profile web add dsh-open-eyes@0.1.2-rc.1` |
 
 安装后重启 DSH Web，并刷新页面。不同 DSH profile 相互独立，需要在每个希望使用 Open Eyes 的 profile 中分别安装。
 
